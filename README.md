@@ -152,8 +152,8 @@ Tests cover areas including validation, authorization, approval handling, retrie
 Clone the repository and enter the project directory:
 
 ```powershell
-git clone https://github.com/junaidte14/research.git
-cd research/agent-fundamentals/agent-ppa
+git clone https://github.com/junaidte14/agent-ppa.git
+cd agent-ppa
 ```
 
 Create and activate a virtual environment (Windows PowerShell):
@@ -230,4 +230,4 @@ The implementation should be treated as an experimental platform, not as evidenc
 
 ## Repository
 
-[View the Agent PPA source code](https://github.com/junaidte14/research/tree/main/agent-fundamentals/agent-ppa)
+[View the Agent PPA source code](https://github.com/junaidte14/agent-ppa)
