@@ -1,4 +1,5 @@
-
+import sqlite3
+import pytest
 from tools.idempotency import IdempotencyStore
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -677,3 +678,536 @@ def test_expired_lease_cannot_be_finished_before_recovery(tmp_path):
 
     assert operation["status"] == "recovery_required"
     assert operation["result"] is None
+
+
+def test_reconciliation_table_is_created(tmp_path):
+    store = IdempotencyStore(
+        tmp_path / "test_idempotency.db"
+    )
+
+    with store._connect() as connection:
+        result = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+            AND name = 'operation_reconciliations'
+            """
+        ).fetchone()
+
+    assert result is not None
+
+
+def test_reconciliation_foreign_key_is_enforced(tmp_path):
+    store = IdempotencyStore(
+        tmp_path / "test_idempotency.db"
+    )
+
+    with store._connect() as connection:
+        foreign_keys_enabled = connection.execute(
+            "PRAGMA foreign_keys"
+        ).fetchone()[0]
+
+        assert foreign_keys_enabled == 1
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO operation_reconciliations (
+                    idempotency_key,
+                    decision,
+                    evidence,
+                    reconciled_at,
+                    reconciled_by
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "nonexistent_operation",
+                    "completed",
+                    "Test evidence",
+                    "2026-11-18T12:00:00+00:00",
+                    "test_operator"
+                )
+            )
+
+
+def create_recovery_required_operation(store, key="test-operation-001"):
+    """Insert an operation that is eligible for reconciliation."""
+    with store._connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO operations (
+                idempotency_key,
+                tool_name,
+                arguments_hash,
+                status,
+                result,
+                created_at,
+                updated_at,
+                lease_expires_at,
+                lease_token,
+                attempt_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                key,
+                "send_message",
+                "test-arguments-hash",
+                "recovery_required",
+                "Original uncertain outcome",
+                "2026-11-19T00:00:00+00:00",
+                "2026-11-19T00:00:00+00:00",
+                None,
+                None,
+                1,
+            ),
+        )
+    return key
+
+
+def get_operation(store, key):
+    with store._connect() as connection:
+        return connection.execute(
+            """
+            SELECT *
+            FROM operations
+            WHERE idempotency_key = ?
+            """,
+            (key,),
+        ).fetchone()
+
+
+def get_reconciliation_count(store, key):
+    with store._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM operation_reconciliations
+            WHERE idempotency_key = ?
+            """,
+            (key,),
+        ).fetchone()
+    return row["count"]
+
+
+@pytest.fixture
+def reconciliation_store(tmp_path):
+    return IdempotencyStore(tmp_path / "reconciliation_test.db")
+
+
+def test_reconcile_completed_operation(reconciliation_store):
+    key = create_recovery_required_operation(reconciliation_store)
+    verified_result = "Message successfully delivered."
+
+    result = reconciliation_store.reconcile_operation(
+        idempotency_key=key,
+        decision="completed",
+        evidence="External service confirms the message was delivered.",
+        reconciled_by="test_operator",
+        reconciled_result=verified_result,
+    )
+
+    operation = get_operation(reconciliation_store, key)
+
+    assert result is True
+    assert operation["status"] == "completed"
+    assert operation["result"] == verified_result
+    assert operation["lease_token"] is None
+    assert operation["lease_expires_at"] is None
+    assert get_reconciliation_count(reconciliation_store, key) == 1
+
+def test_reconcile_failed_operation(reconciliation_store):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    result = reconciliation_store.reconcile_operation(
+        idempotency_key=key,
+        decision="failed",
+        evidence="External service confirms the operation was not executed.",
+        reconciled_by="test_operator",
+    )
+
+    operation = get_operation(reconciliation_store, key)
+
+    assert result is True
+    assert operation["status"] == "failed"
+    assert "reconciled as failed" in operation["result"].lower()
+    assert get_reconciliation_count(reconciliation_store, key) == 1
+
+
+@pytest.mark.parametrize("decision", ["unknown", "in_progress", "cancelled", ""])
+def test_reconcile_rejects_invalid_decision(
+    reconciliation_store,
+    decision,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    with pytest.raises(ValueError):
+        reconciliation_store.reconcile_operation(
+            idempotency_key=key,
+            decision=decision,
+            evidence="Some external evidence.",
+            reconciled_by="test_operator",
+        )
+
+    operation = get_operation(reconciliation_store, key)
+
+    assert operation["status"] == "recovery_required"
+    assert get_reconciliation_count(reconciliation_store, key) == 0
+
+
+@pytest.mark.parametrize("evidence", ["", "   ", "\n\t"])
+def test_reconcile_rejects_empty_evidence(
+    reconciliation_store,
+    evidence,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    with pytest.raises(ValueError):
+        reconciliation_store.reconcile_operation(
+            idempotency_key=key,
+            decision="completed",
+            evidence=evidence,
+            reconciled_by="test_operator",
+            reconciled_result="Verified external result.",
+        )
+
+    assert get_operation(reconciliation_store, key)["status"] == "recovery_required"
+    assert get_reconciliation_count(reconciliation_store, key) == 0
+
+
+@pytest.mark.parametrize("reconciled_by", ["", "   ", "\n\t"])
+def test_reconcile_rejects_empty_operator(
+    reconciliation_store,
+    reconciled_by,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    with pytest.raises(ValueError):
+        reconciliation_store.reconcile_operation(
+            idempotency_key=key,
+            decision="completed",
+            evidence="External service confirms delivery.",
+            reconciled_by=reconciled_by,
+            reconciled_result="Verified external result.",
+        )
+
+    assert get_operation(reconciliation_store, key)["status"] == "recovery_required"
+    assert get_reconciliation_count(reconciliation_store, key) == 0
+
+
+def test_reconcile_rejects_nonexistent_operation(reconciliation_store):
+    result = reconciliation_store.reconcile_operation(
+        idempotency_key="does-not-exist",
+        decision="completed",
+        evidence="External service confirms delivery.",
+        reconciled_by="test_operator",
+        reconciled_result="Verified external result."
+    )
+
+    assert result is False
+    assert get_reconciliation_count(reconciliation_store, "does-not-exist") == 0
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "in_progress", "cancelled"])
+def test_reconcile_rejects_operation_not_requiring_recovery(
+    reconciliation_store,
+    status,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    with reconciliation_store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE operations
+            SET status = ?
+            WHERE idempotency_key = ?
+            """,
+            (status, key),
+        )
+
+    result = reconciliation_store.reconcile_operation(
+        idempotency_key=key,
+        decision="completed",
+        evidence="External service confirms delivery.",
+        reconciled_by="test_operator",
+        reconciled_result="Verified external result."
+    )
+
+    operation = get_operation(reconciliation_store, key)
+
+    assert result is False
+    assert operation["status"] == status
+    assert get_reconciliation_count(reconciliation_store, key) == 0
+
+
+
+def test_reconciliation_preserves_previous_result(reconciliation_store):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    original_operation = get_operation(reconciliation_store, key)
+    original_result = original_operation["result"]
+    verified_result = "Message successfully delivered."
+
+    result = reconciliation_store.reconcile_operation(
+        idempotency_key=key,
+        decision="completed",
+        evidence="External service confirms successful execution.",
+        reconciled_by="test_operator",
+        reconciled_result=verified_result,
+    )
+
+    assert result is True
+
+    operation = get_operation(reconciliation_store, key)
+
+    with reconciliation_store._connect() as connection:
+        history = connection.execute(
+            """
+            SELECT *
+            FROM operation_reconciliations
+            WHERE idempotency_key = ?
+            """,
+            (key,),
+        ).fetchone()
+
+    assert operation["status"] == "completed"
+    assert operation["result"] == verified_result
+    assert history["previous_result"] == original_result
+    assert history["evidence"] == (
+        "External service confirms successful execution."
+    )
+    assert history["decision"] == "completed"
+    assert history["reconciled_by"] == "test_operator"
+
+
+def test_reconciliation_history_failure_rolls_back_operation(
+    reconciliation_store,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    # Simulate a failure when reconciliation history is written.
+    with reconciliation_store._connect() as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_reconciliation_insert
+            BEFORE INSERT ON operation_reconciliations
+            BEGIN
+                SELECT RAISE(ABORT, 'Simulated history insertion failure');
+            END;
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        reconciliation_store.reconcile_operation(
+            idempotency_key=key,
+            decision="completed",
+            evidence="External service confirms successful execution.",
+            reconciled_by="test_operator",
+            reconciled_result="Verified external result."
+        )
+
+    operation = get_operation(reconciliation_store, key)
+
+    assert operation["status"] == "recovery_required"
+    assert operation["result"] == "Original uncertain outcome"
+    assert get_reconciliation_count(reconciliation_store, key) == 0
+
+
+def test_get_reconciliation_history_returns_empty_list(
+    reconciliation_store,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    history = reconciliation_store.get_reconciliation_history(key)
+
+    assert history == []
+
+
+def test_get_reconciliation_history_returns_empty_list_for_unknown_key(
+    reconciliation_store,
+):
+    history = reconciliation_store.get_reconciliation_history(
+        "unknown-operation"
+    )
+
+    assert history == []
+
+
+def test_get_reconciliation_history_returns_record(
+    reconciliation_store,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+    verified_result = "Message successfully delivered."
+    evidence = "External service confirms successful execution."
+
+    reconciliation_store.reconcile_operation(
+        idempotency_key=key,
+        decision="completed",
+        evidence=evidence,
+        reconciled_by="test_operator",
+        reconciled_result=verified_result
+    )
+
+    history = reconciliation_store.get_reconciliation_history(key)
+
+    assert len(history) == 1
+
+    record = history[0]
+
+    assert record["idempotency_key"] == key
+    assert record["decision"] == "completed"
+    assert record["reconciled_result"] == verified_result
+    assert record["evidence"] == evidence
+    assert record["reconciled_by"] == "test_operator"
+    assert record["previous_result"] == "Original uncertain outcome"
+    assert record["reconciliation_id"] is not None
+    assert record["reconciled_at"] is not None
+
+
+def test_get_reconciliation_history_returns_chronological_order(
+    reconciliation_store,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    with reconciliation_store._connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO operation_reconciliations (
+                idempotency_key,
+                decision,
+                evidence,
+                reconciled_at,
+                reconciled_by,
+                previous_result
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    key,
+                    "completed",
+                    "Later evidence",
+                    "2026-11-19T10:00:00+00:00",
+                    "operator_2",
+                    "Original result",
+                ),
+                (
+                    key,
+                    "failed",
+                    "Earlier evidence",
+                    "2026-11-19T09:00:00+00:00",
+                    "operator_1",
+                    "Original result",
+                ),
+            ],
+        )
+
+    history = reconciliation_store.get_reconciliation_history(key)
+
+    assert len(history) == 2
+    assert history[0]["evidence"] == "Earlier evidence"
+    assert history[1]["evidence"] == "Later evidence"
+
+def test_reconcile_completed_requires_verified_result(
+    reconciliation_store,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    with pytest.raises(ValueError, match="result"):
+        reconciliation_store.reconcile_operation(
+            idempotency_key=key,
+            decision="completed",
+            evidence="External service confirms successful execution.",
+            reconciled_by="test_operator",
+        )
+
+    operation = get_operation(reconciliation_store, key)
+
+    assert operation["status"] == "recovery_required"
+    assert operation["result"] == "Original uncertain outcome"
+    assert get_reconciliation_count(reconciliation_store, key) == 0
+
+@pytest.mark.parametrize("reconciled_result", ["", "   ", "\n\t"])
+def test_reconcile_completed_rejects_empty_verified_result(
+    reconciliation_store,
+    reconciled_result,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    with pytest.raises(ValueError, match="result"):
+        reconciliation_store.reconcile_operation(
+            idempotency_key=key,
+            decision="completed",
+            evidence="External service confirms successful execution.",
+            reconciled_by="test_operator",
+            reconciled_result=reconciled_result,
+        )
+
+    operation = get_operation(reconciliation_store, key)
+
+    assert operation["status"] == "recovery_required"
+    assert get_reconciliation_count(reconciliation_store, key) == 0
+
+def test_reconcile_completed_stores_verified_result(
+    reconciliation_store,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+    verified_result = "Message successfully delivered to test@example.com."
+
+    result = reconciliation_store.reconcile_operation(
+        idempotency_key=key,
+        decision="completed",
+        evidence="External service confirms successful delivery.",
+        reconciled_by="test_operator",
+        reconciled_result=verified_result,
+    )
+
+    operation = get_operation(reconciliation_store, key)
+    lookup = reconciliation_store.lookup(key)
+
+    assert result is True
+    assert operation["status"] == "completed"
+    assert operation["result"] == verified_result
+
+    assert lookup["status"] == "completed"
+    assert lookup["result"] == verified_result
+
+def test_reconcile_failed_does_not_require_verified_result(
+    reconciliation_store,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+
+    result = reconciliation_store.reconcile_operation(
+        idempotency_key=key,
+        decision="failed",
+        evidence="External service confirms the operation was not executed.",
+        reconciled_by="test_operator",
+    )
+
+    operation = get_operation(reconciliation_store, key)
+
+    assert result is True
+    assert operation["status"] == "failed"
+    assert "reconciled as failed" in operation["result"].lower()
+
+def test_reconciliation_history_preserves_verified_result(
+    reconciliation_store,
+):
+    key = create_recovery_required_operation(reconciliation_store)
+    verified_result = "Payment transaction confirmed by external service."
+
+    reconciliation_store.reconcile_operation(
+        idempotency_key=key,
+        decision="completed",
+        evidence="External service confirms transaction.",
+        reconciled_by="test_operator",
+        reconciled_result=verified_result,
+    )
+
+    history = reconciliation_store.get_reconciliation_history(key)
+
+    assert len(history) == 1
+    assert history[0]["previous_result"] == "Original uncertain outcome"
+    assert history[0]["reconciled_result"] == verified_result

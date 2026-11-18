@@ -30,6 +30,8 @@ class IdempotencyStore:
         connection.row_factory = sqlite3.Row
 
         try:
+            # Enable foreign-key enforcement for this connection.
+            connection.execute("PRAGMA foreign_keys = ON")
             with connection:
                 yield connection
         finally:
@@ -50,6 +52,24 @@ class IdempotencyStore:
                     lease_expires_at TEXT,
                     lease_token TEXT,
                     attempt_count INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operation_reconciliations (
+                    reconciliation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL,
+                    decision TEXT NOT NULL
+                        CHECK (decision IN ('completed', 'failed')),
+                    evidence TEXT NOT NULL,
+                    reconciled_at TEXT NOT NULL,
+                    reconciled_by TEXT NOT NULL,
+                    previous_result TEXT,
+                    reconciled_result TEXT,
+                    FOREIGN KEY (idempotency_key)
+                        REFERENCES operations(idempotency_key)
                 )
                 """
             )
@@ -319,6 +339,161 @@ class IdempotencyStore:
                 WHERE status = 'recovery_required'
                 ORDER BY updated_at ASC
                 """
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+        
+    def reconcile_operation(
+        self,
+        idempotency_key: str,
+        decision: str,
+        evidence: str,
+        reconciled_by: str,
+        reconciled_result: str | None = None
+    ) -> bool:
+        """
+        Reconcile an uncertain operation using external evidence.
+
+        Only operations in recovery_required status can be reconciled.
+
+        A completed decision requires a verified result. A failed
+        decision does not require one.
+
+        Returns True if reconciliation succeeds, False if the
+        operation does not exist or is not eligible for reconciliation.
+        """
+
+        if decision not in {"completed", "failed"}:
+            raise ValueError(
+                "Decision must be 'completed' or 'failed'."
+            )
+
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError("Reconciliation evidence cannot be empty.")
+
+        if not isinstance(reconciled_by, str) or not reconciled_by.strip():
+            raise ValueError("Reconciled_by cannot be empty.")
+
+        if decision == "completed":
+            if (
+                not isinstance(reconciled_result, str)
+                or not reconciled_result.strip()
+            ):
+                raise ValueError(
+                    "A verified result is required when reconciling "
+                    "an operation as completed."
+                )
+
+            result_to_store = reconciled_result.strip()
+
+        else:
+            result_to_store = (
+                "Operation reconciled as failed "
+                "based on external evidence."
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._connect() as connection:
+            # Reserve the write transaction before checking the operation.
+            connection.execute("BEGIN IMMEDIATE")
+
+            existing = connection.execute(
+                """
+                SELECT result
+                FROM operations
+                WHERE idempotency_key = ?
+                AND status = 'recovery_required'
+                """,
+                (idempotency_key,)
+            ).fetchone()
+
+            if existing is None:
+                return False
+
+            previous_result = existing["result"]
+
+            cursor = connection.execute(
+                """
+                UPDATE operations
+                SET status = ?,
+                    result = ?,
+                    updated_at = ?,
+                    lease_token = NULL,
+                    lease_expires_at = NULL
+                WHERE idempotency_key = ?
+                AND status = 'recovery_required'
+                """,
+                (
+                    decision,
+                    result_to_store,
+                    now,
+                    idempotency_key
+                )
+            )
+
+            if cursor.rowcount != 1:
+                return False
+
+            # Store the reconciliation decision and its evidence
+            # in the same transaction as the operation update.
+            connection.execute(
+                """
+                INSERT INTO operation_reconciliations (
+                    idempotency_key,
+                    decision,
+                    evidence,
+                    reconciled_at,
+                    reconciled_by,
+                    previous_result,
+                    reconciled_result
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    idempotency_key,
+                    decision,
+                    evidence.strip(),
+                    now,
+                    reconciled_by.strip(),
+                    previous_result,
+                    (
+                        reconciled_result.strip()
+                        if decision == "completed"
+                        else None
+                    )
+                )
+            )
+
+            return True
+    
+    def get_reconciliation_history(
+        self,
+        idempotency_key: str
+    ) -> list[dict[str, Any]]:
+        """
+        Retrieve reconciliation records for an operation.
+
+        Records are returned in chronological order.
+        Returns an empty list when no reconciliation history exists.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    reconciliation_id,
+                    idempotency_key,
+                    decision,
+                    evidence,
+                    reconciled_at,
+                    reconciled_by,
+                    previous_result,
+                    reconciled_result
+                FROM operation_reconciliations
+                WHERE idempotency_key = ?
+                ORDER BY reconciled_at ASC, reconciliation_id ASC
+                """,
+                (idempotency_key,)
             ).fetchall()
 
         return [dict(row) for row in rows]

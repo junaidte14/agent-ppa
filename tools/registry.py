@@ -1,5 +1,5 @@
 from typing import Any, Callable
-
+import sqlite3
 from tools.base import Tool
 from tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 from tools.audit import write_audit_event
@@ -282,49 +282,72 @@ def execute_tool(
                             else:
                                 # 10. Execute only after claim, approval and lease renewal.
                                 try:
-                                    execution_result = (
-                                        tool.execute_validated(
-                                            validated_arguments
-                                        )
+                                    execution_result = tool.execute_validated(
+                                        validated_arguments
                                     )
-
-                                    # 11. Finalize using the same lease ownership token.
-                                    finalized = idempotency_store.finish(
-                                        idempotency_key=idempotency_key,
-                                        lease_token=lease_token,
-                                        result=execution_result,
-                                        status="completed"
-                                    )
-
-                                    if finalized:
-                                        result = execution_result
-                                    else:
-                                        result = (
-                                            "Operation execution returned a result, but its lease was lost before finalization. "
-                                            "The execution outcome may be uncertain. Manual recovery is required."
-                                        )
 
                                 except Exception as error:
-                                    execution_error = (
-                                        f"Tool execution error: {error}"
-                                    )
+                                    # The tool reported an execution failure.
+                                    execution_error = f"Tool execution error: {error}"
 
-                                    finalized = idempotency_store.finish(
-                                        idempotency_key=idempotency_key,
-                                        lease_token=lease_token,
-                                        result=execution_error,
-                                        status="failed"
-                                    )
-
-                                    if finalized:
-                                        result = execution_error
-                                    else:
-                                        result = (
-                                            "Tool execution failed, but "
-                                            "its lease was lost before "
-                                            "the failure could be recorded. "
-                                            "Manual recovery is required."
+                                    # Attempt to persist the failure.
+                                    try:
+                                        finalized = idempotency_store.finish(
+                                            idempotency_key=idempotency_key,
+                                            lease_token=lease_token,
+                                            result=execution_error,
+                                            status="failed"
                                         )
+
+                                    except sqlite3.Error:
+                                        result = (
+                                            "Execution outcome uncertain: The tool reported "
+                                            "an error, but the database was unavailable while "
+                                            "recording the failure. Manual recovery is required."
+                                        )
+
+                                    else:
+                                        if finalized:
+                                            result = execution_error
+                                        else:
+                                            result = (
+                                                "Tool execution failed, but its lease was lost "
+                                                "before the failure could be recorded. "
+                                                "Manual recovery is required."
+                                            )
+
+                                else:
+                                    # The tool returned successfully.
+                                    # Finalization is a separate operation and must have
+                                    # its own exception handling.
+                                    try:
+                                        finalized = idempotency_store.finish(
+                                            idempotency_key=idempotency_key,
+                                            lease_token=lease_token,
+                                            result=execution_result,
+                                            status="completed"
+                                        )
+
+                                    except sqlite3.Error:
+                                        result = (
+                                            "Operation execution returned a result, but the "
+                                            "database was unavailable during finalization. "
+                                            "The execution outcome is uncertain from the "
+                                            "operation store's perspective. Manual recovery "
+                                            "is required."
+                                        )
+
+                                    else:
+                                        if finalized:
+                                            result = execution_result
+                                        else:
+                                            result = (
+                                                "Operation execution returned a result, but "
+                                                "its lease was lost before finalization. "
+                                                "The execution outcome may be uncertain. "
+                                                "Manual recovery is required."
+                                            )
+
 
         except Exception as error:
             result = f"Tool execution error: {error}"
