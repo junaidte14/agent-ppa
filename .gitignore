@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 
 *.txt
+!requirements.txt
 audit.log
 
 # Test and development files
