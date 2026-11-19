@@ -45,6 +45,10 @@ This project implements a tool-using AI agent with:
 - Tool execution failures
 - Corrupted or unavailable operation storage
 - Misleading tool output
+- Approval replay or approval applied to modified arguments.
+- Idempotency key reuse across different users or operations.
+- Resource exhaustion through excessive or expensive tool calls.
+- Sensitive data leakage through prompts, errors, logs, or tool outputs.
 
 ## 5. Security and Reliability Objectives
 
@@ -82,6 +86,10 @@ This project implements a tool-using AI agent with:
 - Uncertain external side effects must be reconciled before retrying.
 - Audit records should support reconstruction of important execution events.
 - Database failures must not silently bypass authorization or operation-state checks.
+- Approval must be bound to the exact validated operation, including its tool name and arguments.
+- Idempotency keys must be scoped appropriately to prevent cross-user or cross-operation interference.
+- Tool execution must enforce reasonable limits on arguments, execution time, and repeated requests.
+- Logs and error messages must not expose API keys, credentials, tokens, or unnecessary private data.
 
 ## 9. Scope and Limitations
 
