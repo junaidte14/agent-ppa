@@ -1,9 +1,15 @@
+
 from typing import Any, Callable
-import sqlite3
+
+from sqlalchemy.exc import SQLAlchemyError
+
 from tools.base import Tool
 from tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 from tools.audit import write_audit_event
-from tools.idempotency import idempotency_store
+
+from services.idempotency_service import (
+    idempotency_service as idempotency_store,
+)
 
 from tools.calculator import calculator
 from tools.date_time import get_current_datetime
@@ -14,10 +20,14 @@ from tools.schemas import (
     CalculatorInput,
     DateTimeInput,
     TextAnalyzerInput,
-    MessageInput
+    MessageInput,
 )
 
-# Single source of truth for registered tools.
+
+# ---------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------
+
 TOOLS = [
     Tool(
         name="calculator",
@@ -28,7 +38,7 @@ TOOLS = [
         ),
         args_schema=CalculatorInput,
         function=calculator,
-        required_permission="math:calculate"
+        required_permission="math:calculate",
     ),
     Tool(
         name="get_current_datetime",
@@ -38,7 +48,7 @@ TOOLS = [
         ),
         args_schema=DateTimeInput,
         function=get_current_datetime,
-        required_permission="system:read_time"
+        required_permission="system:read_time",
     ),
     Tool(
         name="analyze_text",
@@ -48,7 +58,7 @@ TOOLS = [
         ),
         args_schema=TextAnalyzerInput,
         function=analyze_text,
-        required_permission="text:analyze"
+        required_permission="text:analyze",
     ),
     Tool(
         name="send_message",
@@ -59,11 +69,10 @@ TOOLS = [
         args_schema=MessageInput,
         function=send_message,
         required_permission="message:send",
-        requires_approval=True
+        requires_approval=True,
     ),
 ]
 
-# Build lookup structures from the tool definitions.
 TOOL_REGISTRY = {
     tool.name: tool for tool in TOOLS
 }
@@ -72,9 +81,14 @@ TOOL_DEFINITIONS = [
     tool.to_llm_definition() for tool in TOOLS
 ]
 
+
+# ---------------------------------------------------------
+# Existing operation response handling
+# ---------------------------------------------------------
+
 def _existing_operation_result(
     status: str,
-    existing: dict[str, Any]
+    existing: dict[str, Any],
 ) -> str:
     """Translate an existing idempotency state into a safe result."""
 
@@ -114,6 +128,55 @@ def _existing_operation_result(
     )
 
 
+# ---------------------------------------------------------
+# Persistence and recovery helpers
+# ---------------------------------------------------------
+
+def _cancel_claim(
+    idempotency_key: str,
+    lease_token: str,
+    result: str,
+) -> bool:
+    """Attempt to cancel a claimed operation."""
+
+    try:
+        return idempotency_store.cancel(
+            idempotency_key=idempotency_key,
+            lease_token=lease_token,
+            result=result,
+        )
+    except SQLAlchemyError:
+        return False
+
+
+def _recover_expired_claim() -> bool:
+    """
+    Attempt to transition expired in-progress operations
+    to recovery_required.
+
+    Returns False if recovery persistence fails.
+    """
+
+    try:
+        idempotency_store.recover_expired_operations()
+        return True
+    except SQLAlchemyError:
+        return False
+
+
+def _finalization_failure_message() -> str:
+    return (
+        "Operation execution returned a result, but the database "
+        "could not confirm finalization. The execution outcome is "
+        "uncertain from the operation store's perspective. "
+        "Manual recovery is required."
+    )
+
+
+# ---------------------------------------------------------
+# Tool execution
+# ---------------------------------------------------------
+
 def execute_tool(
     tool_name: str,
     arguments: str,
@@ -121,7 +184,7 @@ def execute_tool(
     approval_callback: Callable[
         [str, dict[str, Any]], bool
     ] | None = None,
-    idempotency_key: str | None = None
+    idempotency_key: str | None = None,
 ) -> str:
 
     tool = TOOL_REGISTRY.get(tool_name)
@@ -130,7 +193,7 @@ def execute_tool(
         write_audit_event(
             "tool_request",
             tool=tool_name,
-            outcome="unknown_tool"
+            outcome="unknown_tool",
         )
         return f"Tool Error: Unknown tool '{tool_name}'"
 
@@ -140,17 +203,21 @@ def execute_tool(
         permission=tool.required_permission,
         argument_fields=list(
             tool.args_schema.model_fields.keys()
-        )
+        ),
     )
 
-    # 1. Application-level authorization.
+    # -----------------------------------------------------
+    # 1. Authorization must always happen first.
+    # -----------------------------------------------------
+
     if not policy.is_allowed(tool.required_permission):
         write_audit_event(
             "authorization",
             tool=tool.name,
             permission=tool.required_permission,
-            outcome="denied"
+            outcome="denied",
         )
+
         return (
             "Tool authorization error: "
             f"Permission '{tool.required_permission}' "
@@ -161,93 +228,122 @@ def execute_tool(
         "authorization",
         tool=tool.name,
         permission=tool.required_permission,
-        outcome="allowed"
+        outcome="allowed",
     )
 
-    # 2. Preserve the original behavior when no idempotency key is provided.
+    # -----------------------------------------------------
+    # 2. Original non-idempotent execution path.
+    # -----------------------------------------------------
+
     if idempotency_key is None:
-        result = tool.execute(
-            arguments,
-            approval_callback=approval_callback
-        )
+        try:
+            result = tool.execute(
+                arguments,
+                approval_callback=approval_callback,
+            )
+        except Exception as error:
+            result = f"Tool execution error: {error}"
 
     else:
         try:
-            # 3. Validate arguments before claiming or approval.
+            # -------------------------------------------------
+            # 3. Validate arguments before persistence.
+            # -------------------------------------------------
+
             validated_arguments = tool.validate_arguments(
                 arguments
             )
 
-            # 4. Check whether this operation already exists.
+            # -------------------------------------------------
+            # 4. Look up an existing operation.
+            # -------------------------------------------------
+
             existing = idempotency_store.lookup(
                 idempotency_key,
                 tool_name,
-                validated_arguments
+                validated_arguments,
             )
 
             if existing is not None:
                 result = _existing_operation_result(
                     existing["status"],
-                    existing
+                    existing,
                 )
 
-            # 5. Do not create a claim if approval cannot be requested at all.
-            elif tool.requires_approval and approval_callback is None:
+            # -------------------------------------------------
+            # 5. Approval handler must exist when required.
+            # -------------------------------------------------
+
+            elif (
+                tool.requires_approval
+                and approval_callback is None
+            ):
                 result = (
                     "Tool approval error: No approval handler "
                     "configured. Action is blocked."
                 )
 
             else:
-                # 6. Atomically claim BEFORE asking for approval.
+                # -------------------------------------------------
+                # 6. Atomically claim the operation.
+                # -------------------------------------------------
+
                 claim = idempotency_store.claim(
                     idempotency_key,
                     tool_name,
-                    validated_arguments
+                    validated_arguments,
                 )
 
                 if claim["status"] != "new":
                     result = _existing_operation_result(
                         claim["status"],
-                        claim
+                        claim,
                     )
 
                 else:
                     lease_token = claim["lease_token"]
 
-                    # 7. Only the successful claimant reaches the human approval step.
+                    # ---------------------------------------------
+                    # 7. Request approval after claiming.
+                    # ---------------------------------------------
+
                     try:
                         approved = tool.request_approval(
                             validated_arguments,
-                            approval_callback
+                            approval_callback,
                         )
+
                     except Exception as error:
                         approval_error = (
                             f"Tool approval error: {error}"
                         )
 
-                        cancelled = idempotency_store.cancel(
-                            idempotency_key=idempotency_key,
-                            lease_token=lease_token,
-                            result=approval_error
+                        cancelled = _cancel_claim(
+                            idempotency_key,
+                            lease_token,
+                            approval_error,
                         )
 
                         if cancelled:
                             result = approval_error
                         else:
-                            idempotency_store.recover_expired_operations()
+                            _recover_expired_claim()
                             result = (
                                 "Recovery required: Approval handling "
-                                "failed and the operation lease was lost. "
-                                "Manual inspection is required."
+                                "failed and the operation could not be "
+                                "cancelled. Manual inspection is required."
                             )
 
                     else:
+                        # -----------------------------------------
+                        # 8. Handle approval rejection.
+                        # -----------------------------------------
+
                         if not approved:
-                            # 8. Close the claimed operation safely when the human rejects it.
-                            cancelled = idempotency_store.cancel(
-                                idempotency_key=idempotency_key,
-                                lease_token=lease_token
+                            cancelled = _cancel_claim(
+                                idempotency_key,
+                                lease_token,
+                                "Tool execution cancelled by user.",
                             )
 
                             if cancelled:
@@ -255,23 +351,28 @@ def execute_tool(
                                     "Tool execution cancelled by user."
                                 )
                             else:
-                                idempotency_store.recover_expired_operations()
+                                _recover_expired_claim()
                                 result = (
                                     "Recovery required: The operation "
-                                    "could not be cancelled because its "
-                                    "lease was lost. Manual inspection "
-                                    "is required."
+                                    "could not be cancelled. "
+                                    "Manual inspection is required."
                                 )
 
                         else:
-                            # 9. Approval may have taken time. Renew the lease before execution.
+                            # -------------------------------------
+                            # 9. Renew lease after approval.
+                            # -------------------------------------
+
                             renewed = idempotency_store.renew_lease(
                                 idempotency_key=idempotency_key,
-                                lease_token=lease_token
+                                lease_token=lease_token,
                             )
 
                             if not renewed:
-                                idempotency_store.recover_expired_operations()
+                                recovery_succeeded = (
+                                    _recover_expired_claim()
+                                )
+
                                 result = (
                                     "Recovery required: The operation "
                                     "lease expired or was lost while "
@@ -279,31 +380,54 @@ def execute_tool(
                                     "was not executed."
                                 )
 
+                                if not recovery_succeeded:
+                                    result += (
+                                        " Recovery persistence also "
+                                        "failed; inspect the operation "
+                                        "state before retrying."
+                                    )
+
                             else:
-                                # 10. Execute only after claim, approval and lease renewal.
+                                # ---------------------------------
+                                # 10. Execute the validated tool.
+                                # ---------------------------------
+
                                 try:
-                                    execution_result = tool.execute_validated(
-                                        validated_arguments
+                                    execution_result = (
+                                        tool.execute_validated(
+                                            validated_arguments
+                                        )
                                     )
 
                                 except Exception as error:
-                                    # The tool reported an execution failure.
-                                    execution_error = f"Tool execution error: {error}"
+                                    execution_error = (
+                                        f"Tool execution error: {error}"
+                                    )
 
-                                    # Attempt to persist the failure.
+                                    # -----------------------------
+                                    # 11. Persist execution failure.
+                                    # -----------------------------
+
                                     try:
-                                        finalized = idempotency_store.finish(
-                                            idempotency_key=idempotency_key,
-                                            lease_token=lease_token,
-                                            result=execution_error,
-                                            status="failed"
+                                        finalized = (
+                                            idempotency_store.finish(
+                                                idempotency_key=(
+                                                    idempotency_key
+                                                ),
+                                                lease_token=lease_token,
+                                                result=execution_error,
+                                                status="failed",
+                                            )
                                         )
 
-                                    except sqlite3.Error:
+                                    except SQLAlchemyError:
                                         result = (
-                                            "Execution outcome uncertain: The tool reported "
-                                            "an error, but the database was unavailable while "
-                                            "recording the failure. Manual recovery is required."
+                                            "Execution outcome uncertain: "
+                                            "The tool reported an error, "
+                                            "but the database was "
+                                            "unavailable while recording "
+                                            "the failure. Manual recovery "
+                                            "is required."
                                         )
 
                                     else:
@@ -311,30 +435,33 @@ def execute_tool(
                                             result = execution_error
                                         else:
                                             result = (
-                                                "Tool execution failed, but its lease was lost "
-                                                "before the failure could be recorded. "
-                                                "Manual recovery is required."
+                                                "Tool execution failed, "
+                                                "but its lease was lost "
+                                                "before the failure could "
+                                                "be recorded. Manual "
+                                                "recovery is required."
                                             )
 
                                 else:
-                                    # The tool returned successfully.
-                                    # Finalization is a separate operation and must have
-                                    # its own exception handling.
+                                    # ---------------------------------
+                                    # 12. Persist successful execution.
+                                    # ---------------------------------
+
                                     try:
-                                        finalized = idempotency_store.finish(
-                                            idempotency_key=idempotency_key,
-                                            lease_token=lease_token,
-                                            result=execution_result,
-                                            status="completed"
+                                        finalized = (
+                                            idempotency_store.finish(
+                                                idempotency_key=(
+                                                    idempotency_key
+                                                ),
+                                                lease_token=lease_token,
+                                                result=execution_result,
+                                                status="completed",
+                                            )
                                         )
 
-                                    except sqlite3.Error:
+                                    except SQLAlchemyError:
                                         result = (
-                                            "Operation execution returned a result, but the "
-                                            "database was unavailable during finalization. "
-                                            "The execution outcome is uncertain from the "
-                                            "operation store's perspective. Manual recovery "
-                                            "is required."
+                                            _finalization_failure_message()
                                         )
 
                                     else:
@@ -342,17 +469,30 @@ def execute_tool(
                                             result = execution_result
                                         else:
                                             result = (
-                                                "Operation execution returned a result, but "
-                                                "its lease was lost before finalization. "
-                                                "The execution outcome may be uncertain. "
-                                                "Manual recovery is required."
+                                                "Operation execution "
+                                                "returned a result, but "
+                                                "its lease was lost before "
+                                                "finalization. The "
+                                                "execution outcome may "
+                                                "be uncertain. Manual "
+                                                "recovery is required."
                                             )
 
+        except SQLAlchemyError:
+            result = (
+                "Idempotency persistence error: The PostgreSQL "
+                "database operation failed. The tool was not "
+                "confirmed as completed. Please inspect the "
+                "operation state before retrying."
+            )
 
         except Exception as error:
             result = f"Tool execution error: {error}"
 
-    # 12. Record the final outcome.
+    # -----------------------------------------------------
+    # 13. Record the final audit outcome.
+    # -----------------------------------------------------
+
     if result == "Tool execution cancelled by user.":
         outcome = "cancelled"
 
@@ -362,13 +502,21 @@ def execute_tool(
     elif result.startswith("Tool execution error:"):
         outcome = "execution_error"
 
+    elif result.startswith("Idempotency persistence error:"):
+        outcome = "persistence_error"
+
     elif result.startswith("Recovery required:"):
         outcome = "recovery_required"
 
-    elif result.startswith("Tool execution failed,"):
+    elif result.startswith("Execution outcome uncertain:"):
         outcome = "execution_uncertain"
 
-    elif result.startswith("Operation execution returned a result,"):
+    elif result.startswith(
+        "Operation execution returned a result,"
+    ):
+        outcome = "execution_uncertain"
+
+    elif result.startswith("Tool execution failed,"):
         outcome = "execution_uncertain"
 
     elif result.startswith("Idempotency notice:"):
@@ -390,7 +538,7 @@ def execute_tool(
         "tool_execution",
         tool=tool.name,
         permission=tool.required_permission,
-        outcome=outcome
+        outcome=outcome,
     )
 
     return result

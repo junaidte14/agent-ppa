@@ -1,26 +1,251 @@
-import pytest
-import json
-from tools.policy import ToolPolicy
-from tools.idempotency import IdempotencyStore
 
-from tools.registry import (
-    TOOL_DEFINITIONS,
-    TOOL_REGISTRY,
-    execute_tool
-)
+import json
+from uuid import uuid4
+
+import pytest
+
+from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.exc import SQLAlchemyError
+
+from database.connection import SessionLocal
+from database.models import Operation, OperationReconciliation
+from services.idempotency_service import IdempotencyService
+
+from tools.policy import ToolPolicy
 
 import tools.registry as registry
 
+
+# ---------------------------------------------------------
+# PostgreSQL test adapter
+# ---------------------------------------------------------
+
+class PostgreSQLTestIdempotencyStore:
+    """
+    Test adapter around the real PostgreSQL IdempotencyService.
+
+    Each test receives a unique idempotency-key namespace.
+    The adapter keeps test records isolated and provides
+    a PostgreSQL-specific lease-expiration helper.
+    """
+
+    def __init__(self, service, prefix):
+        self.service = service
+        self.prefix = prefix
+
+    def _key(self, idempotency_key):
+        return f"{self.prefix}{idempotency_key}"
+
+    def lookup(
+        self,
+        idempotency_key,
+        tool_name=None,
+        arguments=None,
+    ):
+        return self.service.lookup(
+            self._key(idempotency_key),
+            tool_name,
+            arguments,
+        )
+
+    def claim(
+        self,
+        idempotency_key,
+        tool_name,
+        arguments,
+        lease_duration_seconds=60,
+    ):
+        return self.service.claim(
+            self._key(idempotency_key),
+            tool_name,
+            arguments,
+            lease_duration_seconds,
+        )
+
+    def finish(
+        self,
+        idempotency_key,
+        lease_token,
+        result,
+        status="completed",
+    ):
+        return self.service.finish(
+            self._key(idempotency_key),
+            lease_token,
+            result,
+            status,
+        )
+
+    def renew_lease(
+        self,
+        idempotency_key,
+        lease_token,
+        lease_duration_seconds=60,
+    ):
+        return self.service.renew_lease(
+            self._key(idempotency_key),
+            lease_token,
+            lease_duration_seconds,
+        )
+
+    def cancel(
+        self,
+        idempotency_key,
+        lease_token,
+        result="Tool execution cancelled by user.",
+    ):
+        return self.service.cancel(
+            self._key(idempotency_key),
+            lease_token,
+            result,
+        )
+
+    def reconcile_operation(
+        self,
+        idempotency_key,
+        decision,
+        evidence,
+        reconciled_by,
+        reconciled_result=None,
+    ):
+        return self.service.reconcile_operation(
+            self._key(idempotency_key),
+            decision,
+            evidence,
+            reconciled_by,
+            reconciled_result,
+        )
+
+    def get_reconciliation_history(self, idempotency_key):
+        return self.service.get_reconciliation_history(
+            self._key(idempotency_key)
+        )
+
+    def expire_lease(self, idempotency_key):
+        """
+        Test helper: expire one in-progress operation using
+        PostgreSQL timestamps.
+        """
+
+        with self.service.session_factory() as session:
+            with session.begin():
+                statement = (
+                    update(Operation)
+                    .where(
+                        Operation.idempotency_key
+                        == self._key(idempotency_key),
+                        Operation.status == "in_progress",
+                    )
+                    .values(
+                        lease_expires_at=(
+                            func.now() - text("INTERVAL '1 second'")
+                        ),
+                        updated_at=func.now(),
+                    )
+                    .returning(Operation.id)
+                )
+
+                return session.scalar(statement) is not None
+
+    def recover_expired_operations(self):
+        """
+        Test-scoped recovery.
+
+        The production service recovers all expired operations.
+        This adapter scopes recovery to the current test's keys
+        so one test cannot modify another test's records.
+        """
+
+        with self.service.session_factory() as session:
+            with session.begin():
+                statement = (
+                    update(Operation)
+                    .where(
+                        Operation.idempotency_key.like(
+                            f"{self.prefix}%"
+                        ),
+                        Operation.status == "in_progress",
+                        Operation.lease_expires_at <= func.now(),
+                    )
+                    .values(
+                        status="recovery_required",
+                        lease_token=None,
+                        lease_expires_at=None,
+                        updated_at=func.now(),
+                    )
+                    .returning(Operation.id)
+                )
+
+                return len(session.scalars(statement).all())
+
+    def cleanup(self):
+        """Delete this test's reconciliation and operation rows."""
+
+        with self.service.session_factory() as session:
+            with session.begin():
+                operation_ids = select(Operation.id).where(
+                    Operation.idempotency_key.like(
+                        f"{self.prefix}%"
+                    )
+                )
+
+                session.execute(
+                    delete(OperationReconciliation).where(
+                        OperationReconciliation.operation_id.in_(
+                            operation_ids
+                        )
+                    )
+                )
+
+                session.execute(
+                    delete(Operation).where(
+                        Operation.idempotency_key.like(
+                            f"{self.prefix}%"
+                        )
+                    )
+                )
+
+
+# ---------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------
+
+@pytest.fixture
+def isolated_idempotency_store(monkeypatch):
+    service = IdempotencyService(
+        session_factory=SessionLocal
+    )
+
+    store = PostgreSQLTestIdempotencyStore(
+        service=service,
+        prefix=f"pytest-tool-arch-{uuid4().hex}:",
+    )
+
+    monkeypatch.setattr(
+        registry,
+        "idempotency_store",
+        store,
+    )
+
+    yield store
+
+    store.cleanup()
+
+
+# ---------------------------------------------------------
+# Tool registration and basic execution
+# ---------------------------------------------------------
+
 def test_all_tools_are_registered():
-    assert "calculator" in TOOL_REGISTRY
-    assert "get_current_datetime" in TOOL_REGISTRY
-    assert "analyze_text" in TOOL_REGISTRY
+    assert "calculator" in registry.TOOL_REGISTRY
+    assert "get_current_datetime" in registry.TOOL_REGISTRY
+    assert "analyze_text" in registry.TOOL_REGISTRY
 
 
 def test_tool_definitions_are_generated():
     names = [
         item["function"]["name"]
-        for item in TOOL_DEFINITIONS
+        for item in registry.TOOL_DEFINITIONS
     ]
 
     assert "calculator" in names
@@ -29,52 +254,57 @@ def test_tool_definitions_are_generated():
 
 
 def test_calculator_execution():
-    result = execute_tool(
+    result = registry.execute_tool(
         "calculator",
-        json.dumps({"expression": "10 + 5"})
+        json.dumps({"expression": "10 + 5"}),
     )
 
     assert result == "15"
 
 
 def test_invalid_calculator_arguments():
-    result = execute_tool(
+    result = registry.execute_tool(
         "calculator",
-        json.dumps({"wrong_field": "10 + 5"})
+        json.dumps({"wrong_field": "10 + 5"}),
     )
 
     assert "Invalid arguments" in result
 
 
 def test_unexpected_argument_is_rejected():
-    result = execute_tool(
+    result = registry.execute_tool(
         "calculator",
         json.dumps({
             "expression": "10 + 5",
-            "admin": True
-        })
+            "admin": True,
+        }),
     )
 
     assert "Invalid arguments" in result
 
 
 def test_unknown_tool():
-    result = execute_tool(
+    result = registry.execute_tool(
         "unknown_tool",
-        "{}"
+        "{}",
     )
 
     assert "Unknown tool" in result
+
+
+# ---------------------------------------------------------
+# Authorization
+# ---------------------------------------------------------
 
 def test_authorized_tool_executes():
     policy = ToolPolicy(
         allowed_permissions=frozenset({"math:calculate"})
     )
 
-    result = execute_tool(
+    result = registry.execute_tool(
         "calculator",
         '{"expression": "10 + 5"}',
-        policy=policy
+        policy=policy,
     )
 
     assert result == "15"
@@ -85,10 +315,10 @@ def test_unauthorized_tool_is_blocked():
         allowed_permissions=frozenset()
     )
 
-    result = execute_tool(
+    result = registry.execute_tool(
         "calculator",
         '{"expression": "10 + 5"}',
-        policy=policy
+        policy=policy,
     )
 
     assert "Tool authorization error" in result
@@ -100,15 +330,19 @@ def test_authorization_precedes_argument_validation():
         allowed_permissions=frozenset()
     )
 
-    result = execute_tool(
+    result = registry.execute_tool(
         "calculator",
         '{"unexpected": true}',
-        policy=policy
+        policy=policy,
     )
 
     assert "Tool authorization error" in result
     assert "Invalid arguments" not in result
 
+
+# ---------------------------------------------------------
+# Approval behavior
+# ---------------------------------------------------------
 
 def test_approved_action_executes():
     policy = ToolPolicy(
@@ -120,11 +354,11 @@ def test_approved_action_executes():
         assert arguments["recipient"] == "test@example.com"
         return True
 
-    result = execute_tool(
+    result = registry.execute_tool(
         "send_message",
         '{"recipient":"test@example.com","message":"Hello"}',
         policy=policy,
-        approval_callback=approve_action
+        approval_callback=approve_action,
     )
 
     assert "SIMULATION ONLY" in result
@@ -138,11 +372,11 @@ def test_rejected_action_does_not_execute():
     def reject_action(tool_name, arguments):
         return False
 
-    result = execute_tool(
+    result = registry.execute_tool(
         "send_message",
         '{"recipient":"test@example.com","message":"Hello"}',
         policy=policy,
-        approval_callback=reject_action
+        approval_callback=reject_action,
     )
 
     assert "cancelled by user" in result
@@ -153,10 +387,10 @@ def test_approval_required_but_no_handler():
         allowed_permissions=frozenset({"message:send"})
     )
 
-    result = execute_tool(
+    result = registry.execute_tool(
         "send_message",
         '{"recipient":"test@example.com","message":"Hello"}',
-        policy=policy
+        policy=policy,
     )
 
     assert "No approval handler" in result
@@ -175,35 +409,24 @@ def test_unauthorized_action_never_requests_approval():
         approval_called = True
         return True
 
-    result = execute_tool(
+    result = registry.execute_tool(
         "send_message",
         '{"recipient":"test@example.com","message":"Hello"}',
         policy=policy,
-        approval_callback=approve_action
+        approval_callback=approve_action,
     )
 
     assert "Tool authorization error" in result
     assert approval_called is False
 
 
-
-
-@pytest.fixture
-def isolated_idempotency_store(tmp_path, monkeypatch):
-    store = IdempotencyStore(
-        tmp_path / "test_idempotency.db"
-    )
-    monkeypatch.setattr(
-        registry,
-        "idempotency_store",
-        store
-    )
-    return store
-
+# ---------------------------------------------------------
+# Idempotent execution
+# ---------------------------------------------------------
 
 def test_idempotent_operation_executes_only_once(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
     tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
@@ -218,13 +441,13 @@ def test_idempotent_operation_executes_only_once(
     first_result = registry.execute_tool(
         "calculator",
         '{"expression": "10 + 5"}',
-        idempotency_key="test-operation-001"
+        idempotency_key="test-operation-001",
     )
 
     second_result = registry.execute_tool(
         "calculator",
         '{"expression": "10 + 5"}',
-        idempotency_key="test-operation-001"
+        idempotency_key="test-operation-001",
     )
 
     assert first_result == "result:10 + 5"
@@ -234,7 +457,7 @@ def test_idempotent_operation_executes_only_once(
 
 def test_idempotency_key_rejects_different_arguments(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
     tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
@@ -249,13 +472,13 @@ def test_idempotency_key_rejects_different_arguments(
     registry.execute_tool(
         "calculator",
         '{"expression": "10 + 5"}',
-        idempotency_key="test-operation-002"
+        idempotency_key="test-operation-002",
     )
 
     result = registry.execute_tool(
         "calculator",
         '{"expression": "20 + 5"}',
-        idempotency_key="test-operation-002"
+        idempotency_key="test-operation-002",
     )
 
     assert "Idempotency conflict" in result
@@ -264,7 +487,7 @@ def test_idempotency_key_rejects_different_arguments(
 
 def test_in_progress_operation_is_not_executed_again(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
     tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
@@ -279,13 +502,13 @@ def test_in_progress_operation_is_not_executed_again(
     isolated_idempotency_store.claim(
         "test-operation-003",
         "calculator",
-        {"expression": "10 + 5"}
+        {"expression": "10 + 5"},
     )
 
     result = registry.execute_tool(
         "calculator",
         '{"expression": "10 + 5"}',
-        idempotency_key="test-operation-003"
+        idempotency_key="test-operation-003",
     )
 
     assert "already in progress" in result
@@ -294,7 +517,7 @@ def test_in_progress_operation_is_not_executed_again(
 
 def test_failed_operation_is_not_executed_again(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
     tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
@@ -309,31 +532,34 @@ def test_failed_operation_is_not_executed_again(
     claim = isolated_idempotency_store.claim(
         "test-operation-004",
         "calculator",
-        {"expression": "10 + 5"}
+        {"expression": "10 + 5"},
     )
 
     isolated_idempotency_store.finish(
-        idempotency_key = "test-operation-004",
-        result = "Previous simulated failure",
-        lease_token = claim["lease_token"],
-        status="failed"
+        idempotency_key="test-operation-004",
+        result="Previous simulated failure",
+        lease_token=claim["lease_token"],
+        status="failed",
     )
 
     result = registry.execute_tool(
         "calculator",
         '{"expression": "10 + 5"}',
-        idempotency_key="test-operation-004"
+        idempotency_key="test-operation-004",
     )
 
     assert "Automatic re-execution is blocked" in result
     assert execution_count == 0
 
+
+# ---------------------------------------------------------
+# Expired leases and recovery
+# ---------------------------------------------------------
+
 def test_recovery_required_operation_is_not_executed(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    import tools.registry as registry
-
     execution_count = 0
 
     def fake_calculator(expression):
@@ -342,90 +568,56 @@ def test_recovery_required_operation_is_not_executed(
         return "10"
 
     monkeypatch.setattr(
-        registry,
-        "idempotency_store",
-        isolated_idempotency_store
-    )
-
-    monkeypatch.setattr(
         registry.TOOL_REGISTRY["calculator"],
         "function",
-        fake_calculator
+        fake_calculator,
     )
 
-    claim = isolated_idempotency_store.claim(
+    isolated_idempotency_store.claim(
         "recovery_registry_001",
         "calculator",
-        {"expression": "5 + 5"}
+        {"expression": "5 + 5"},
     )
 
-    with isolated_idempotency_store._connect() as connection:
-        connection.execute(
-            """
-            UPDATE operations
-            SET lease_expires_at = ?
-            WHERE idempotency_key = ?
-            """,
-            (
-                "2000-01-01T00:00:00+00:00",
-                "recovery_registry_001"
-            )
-        )
+    assert isolated_idempotency_store.expire_lease(
+        "recovery_registry_001"
+    )
 
     isolated_idempotency_store.recover_expired_operations()
 
     result = registry.execute_tool(
         tool_name="calculator",
         arguments='{"expression": "5 + 5"}',
-        idempotency_key="recovery_registry_001"
+        idempotency_key="recovery_registry_001",
     )
 
     assert "Recovery required" in result
     assert execution_count == 0
 
+
 def test_lost_lease_during_execution_does_not_report_success(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    import tools.registry as registry
-
-    monkeypatch.setattr(
-        registry,
-        "idempotency_store",
-        isolated_idempotency_store
-    )
-
     def fake_calculator(expression):
-        # Simulate the lease expiring while the tool is executing.
-        with isolated_idempotency_store._connect() as connection:
-            connection.execute(
-                """
-                UPDATE operations
-                SET lease_expires_at = ?
-                WHERE idempotency_key = ?
-                """,
-                (
-                    "2000-01-01T00:00:00+00:00",
-                    "lost_lease_001"
-                )
-            )
+        assert isolated_idempotency_store.expire_lease(
+            "lost_lease_001"
+        )
 
-        # Simulate another process detecting the expired lease.
         isolated_idempotency_store.recover_expired_operations()
 
-        # The original worker still returns a result.
         return "10"
 
     monkeypatch.setattr(
         registry.TOOL_REGISTRY["calculator"],
         "function",
-        fake_calculator
+        fake_calculator,
     )
 
     result = registry.execute_tool(
         tool_name="calculator",
         arguments='{"expression": "5 + 5"}',
-        idempotency_key="lost_lease_001"
+        idempotency_key="lost_lease_001",
     )
 
     assert "lease was lost" in result.lower()
@@ -438,9 +630,62 @@ def test_lost_lease_during_execution_does_not_report_success(
     assert operation["result"] is None
 
 
+def test_expired_lease_during_approval_prevents_execution(
+    isolated_idempotency_store,
+    monkeypatch,
+):
+    execution_count = 0
+
+    def fake_send_message(recipient, message):
+        nonlocal execution_count
+        execution_count += 1
+        return "SIMULATION ONLY: Message processed."
+
+    monkeypatch.setattr(
+        registry.TOOL_REGISTRY["send_message"],
+        "function",
+        fake_send_message,
+    )
+
+    policy = ToolPolicy(
+        allowed_permissions=frozenset({"message:send"})
+    )
+
+    def approve_after_lease_expiry(tool_name, arguments):
+        assert isolated_idempotency_store.expire_lease(
+            "approval_lease_expired_001"
+        )
+        return True
+
+    result = registry.execute_tool(
+        tool_name="send_message",
+        arguments=(
+            '{"recipient":"test@example.com",'
+            '"message":"Hello"}'
+        ),
+        policy=policy,
+        approval_callback=approve_after_lease_expiry,
+        idempotency_key="approval_lease_expired_001",
+    )
+
+    assert "Recovery required" in result
+    assert execution_count == 0
+
+    operation = isolated_idempotency_store.lookup(
+        "approval_lease_expired_001"
+    )
+
+    assert operation["status"] == "recovery_required"
+    assert operation["result"] is None
+
+
+# ---------------------------------------------------------
+# Approval and idempotency interaction
+# ---------------------------------------------------------
+
 def test_duplicate_request_does_not_trigger_second_approval(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
     tool = registry.TOOL_REGISTRY["send_message"]
 
@@ -456,7 +701,7 @@ def test_duplicate_request_does_not_trigger_second_approval(
     monkeypatch.setattr(
         tool,
         "function",
-        fake_send_message
+        fake_send_message,
     )
 
     policy = ToolPolicy(
@@ -468,14 +713,11 @@ def test_duplicate_request_does_not_trigger_second_approval(
 
         approval_count += 1
 
-        # The first request must already own the operation.
         operation = isolated_idempotency_store.lookup(
             "duplicate_approval_001"
         )
         assert operation["status"] == "in_progress"
 
-        # Simulate a duplicate request arriving while approval
-        # for the first request is still pending.
         duplicate_result = registry.execute_tool(
             tool_name="send_message",
             arguments=(
@@ -484,7 +726,7 @@ def test_duplicate_request_does_not_trigger_second_approval(
             ),
             policy=policy,
             approval_callback=approve_action,
-            idempotency_key="duplicate_approval_001"
+            idempotency_key="duplicate_approval_001",
         )
 
         return True
@@ -497,7 +739,7 @@ def test_duplicate_request_does_not_trigger_second_approval(
         ),
         policy=policy,
         approval_callback=approve_action,
-        idempotency_key="duplicate_approval_001"
+        idempotency_key="duplicate_approval_001",
     )
 
     assert "SIMULATION ONLY" in first_result
@@ -508,7 +750,7 @@ def test_duplicate_request_does_not_trigger_second_approval(
 
 def test_rejected_approval_cancels_idempotent_operation(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
     tool = registry.TOOL_REGISTRY["send_message"]
 
@@ -523,7 +765,7 @@ def test_rejected_approval_cancels_idempotent_operation(
     monkeypatch.setattr(
         tool,
         "function",
-        fake_send_message
+        fake_send_message,
     )
 
     policy = ToolPolicy(
@@ -543,7 +785,7 @@ def test_rejected_approval_cancels_idempotent_operation(
         ),
         policy=policy,
         approval_callback=reject_action,
-        idempotency_key="rejected_approval_001"
+        idempotency_key="rejected_approval_001",
     )
 
     assert "cancelled by user" in result.lower()
@@ -555,7 +797,6 @@ def test_rejected_approval_cancels_idempotent_operation(
     assert operation["status"] == "cancelled"
     assert operation["result"] == "Tool execution cancelled by user."
 
-    # A repeated request using the same key must not prompt again.
     repeated_result = registry.execute_tool(
         tool_name="send_message",
         arguments=(
@@ -564,7 +805,7 @@ def test_rejected_approval_cancels_idempotent_operation(
         ),
         policy=policy,
         approval_callback=reject_action,
-        idempotency_key="rejected_approval_001"
+        idempotency_key="rejected_approval_001",
     )
 
     assert "Previous execution was cancelled" in repeated_result
@@ -572,75 +813,10 @@ def test_rejected_approval_cancels_idempotent_operation(
     assert execution_count == 0
 
 
-def test_expired_lease_during_approval_prevents_execution(
-    isolated_idempotency_store,
-    monkeypatch
-):
-    tool = registry.TOOL_REGISTRY["send_message"]
-
-    execution_count = 0
-
-    def fake_send_message(recipient, message):
-        nonlocal execution_count
-        execution_count += 1
-        return "SIMULATION ONLY: Message processed."
-
-    monkeypatch.setattr(
-        tool,
-        "function",
-        fake_send_message
-    )
-
-    policy = ToolPolicy(
-        allowed_permissions=frozenset({"message:send"})
-    )
-
-    def approve_after_lease_expiry(tool_name, arguments):
-        # Simulate the human taking longer than the lease duration.
-        with isolated_idempotency_store._connect() as connection:
-            connection.execute(
-                """
-                UPDATE operations
-                SET lease_expires_at = ?
-                WHERE idempotency_key = ?
-                """,
-                (
-                    "2000-01-01T00:00:00+00:00",
-                    "approval_lease_expired_001"
-                )
-            )
-
-        return True
-
-    result = registry.execute_tool(
-        tool_name="send_message",
-        arguments=(
-            '{"recipient":"test@example.com",'
-            '"message":"Hello"}'
-        ),
-        policy=policy,
-        approval_callback=approve_after_lease_expiry,
-        idempotency_key="approval_lease_expired_001"
-    )
-
-    assert "Recovery required" in result
-    assert execution_count == 0
-
-    operation = isolated_idempotency_store.lookup(
-        "approval_lease_expired_001"
-    )
-
-    assert operation["status"] == "recovery_required"
-    assert operation["result"] is None
-
-
-
 def test_approval_cannot_override_missing_authorization(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["send_message"]
-
     execution_count = 0
     approval_count = 0
 
@@ -650,12 +826,11 @@ def test_approval_cannot_override_missing_authorization(
         return "SIMULATION ONLY: Message processed."
 
     monkeypatch.setattr(
-        tool,
+        registry.TOOL_REGISTRY["send_message"],
         "function",
-        fake_send_message
+        fake_send_message,
     )
 
-    # The user does not have permission to send messages.
     policy = ToolPolicy(
         allowed_permissions=frozenset()
     )
@@ -673,19 +848,13 @@ def test_approval_cannot_override_missing_authorization(
         ),
         policy=policy,
         approval_callback=approve_action,
-        idempotency_key="unauthorized_approval_001"
+        idempotency_key="unauthorized_approval_001",
     )
 
-    # Authorization must reject the operation.
     assert "Tool authorization error" in result
-
-    # Approval must never be requested.
     assert approval_count == 0
-
-    # The underlying tool must never execute.
     assert execution_count == 0
 
-    # An unauthorized operation must not acquire an idempotency record.
     operation = isolated_idempotency_store.lookup(
         "unauthorized_approval_001"
     )
@@ -693,14 +862,14 @@ def test_approval_cannot_override_missing_authorization(
     assert operation is None
 
 
-import sqlite3
-
+# ---------------------------------------------------------
+# Database persistence failures
+# ---------------------------------------------------------
 
 def test_database_lookup_failure_prevents_tool_execution(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
 
     def fake_calculator(expression):
@@ -709,32 +878,35 @@ def test_database_lookup_failure_prevents_tool_execution(
         return "10"
 
     def failing_lookup(*args, **kwargs):
-        raise sqlite3.OperationalError(
+        raise SQLAlchemyError(
             "simulated database unavailable"
         )
 
-    monkeypatch.setattr(tool, "function", fake_calculator)
+    monkeypatch.setattr(
+        registry.TOOL_REGISTRY["calculator"],
+        "function",
+        fake_calculator,
+    )
     monkeypatch.setattr(
         isolated_idempotency_store,
         "lookup",
-        failing_lookup
+        failing_lookup,
     )
 
     result = registry.execute_tool(
         "calculator",
         '{"expression":"5 + 5"}',
-        idempotency_key="db_lookup_failure_001"
+        idempotency_key="db_lookup_failure_001",
     )
 
-    assert "Tool execution error" in result
+    assert "Idempotency persistence error" in result
     assert execution_count == 0
 
 
 def test_database_claim_failure_prevents_tool_execution(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
 
     def fake_calculator(expression):
@@ -743,32 +915,35 @@ def test_database_claim_failure_prevents_tool_execution(
         return "10"
 
     def failing_claim(*args, **kwargs):
-        raise sqlite3.OperationalError(
+        raise SQLAlchemyError(
             "simulated database unavailable"
         )
 
-    monkeypatch.setattr(tool, "function", fake_calculator)
+    monkeypatch.setattr(
+        registry.TOOL_REGISTRY["calculator"],
+        "function",
+        fake_calculator,
+    )
     monkeypatch.setattr(
         isolated_idempotency_store,
         "claim",
-        failing_claim
+        failing_claim,
     )
 
     result = registry.execute_tool(
         "calculator",
         '{"expression":"5 + 5"}',
-        idempotency_key="db_claim_failure_001"
+        idempotency_key="db_claim_failure_001",
     )
 
-    assert "Tool execution error" in result
+    assert "Idempotency persistence error" in result
     assert execution_count == 0
 
 
 def test_database_finalization_failure_reports_uncertain_outcome(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
 
     def fake_calculator(expression):
@@ -777,21 +952,25 @@ def test_database_finalization_failure_reports_uncertain_outcome(
         return "10"
 
     def failing_finish(*args, **kwargs):
-        raise sqlite3.OperationalError(
+        raise SQLAlchemyError(
             "simulated database unavailable"
         )
 
-    monkeypatch.setattr(tool, "function", fake_calculator)
+    monkeypatch.setattr(
+        registry.TOOL_REGISTRY["calculator"],
+        "function",
+        fake_calculator,
+    )
     monkeypatch.setattr(
         isolated_idempotency_store,
         "finish",
-        failing_finish
+        failing_finish,
     )
 
     result = registry.execute_tool(
         "calculator",
         '{"expression":"5 + 5"}',
-        idempotency_key="db_finish_failure_001"
+        idempotency_key="db_finish_failure_001",
     )
 
     assert execution_count == 1
@@ -800,9 +979,8 @@ def test_database_finalization_failure_reports_uncertain_outcome(
 
 def test_uncertain_execution_requires_recovery_and_is_not_reexecuted(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
 
     def fake_calculator(expression):
@@ -811,30 +989,34 @@ def test_uncertain_execution_requires_recovery_and_is_not_reexecuted(
         return "10"
 
     def failing_finish(*args, **kwargs):
-        raise sqlite3.OperationalError(
+        raise SQLAlchemyError(
             "simulated database unavailable"
         )
 
-    monkeypatch.setattr(tool, "function", fake_calculator)
+    monkeypatch.setattr(
+        registry.TOOL_REGISTRY["calculator"],
+        "function",
+        fake_calculator,
+    )
     monkeypatch.setattr(
         isolated_idempotency_store,
         "finish",
-        failing_finish
+        failing_finish,
     )
 
     idempotency_key = "crash_recovery_test_001"
 
-    # Step 1: Execute the operation.
+    # Execute the operation.
     result = registry.execute_tool(
         "calculator",
         '{"expression":"5 + 5"}',
-        idempotency_key=idempotency_key
+        idempotency_key=idempotency_key,
     )
 
     assert execution_count == 1
     assert "uncertain" in result.lower()
 
-    # Step 2: Verify that the operation remains in progress.
+    # The operation remains in progress because finalization failed.
     operation = isolated_idempotency_store.lookup(
         idempotency_key
     )
@@ -842,52 +1024,39 @@ def test_uncertain_execution_requires_recovery_and_is_not_reexecuted(
     assert operation is not None
     assert operation["status"] == "in_progress"
 
-    # Step 3: Simulate an expired lease.
-    with sqlite3.connect(
-        isolated_idempotency_store.database_path
-    ) as connection:
-        connection.execute(
-            """
-            UPDATE operations
-            SET lease_expires_at = ?
-            WHERE idempotency_key = ?
-            """,
-            (
-                "2000-01-01T00:00:00+00:00",
-                idempotency_key
-            )
-        )
-
-    # Step 4: Run recovery.
-    recovered_count = (
-        isolated_idempotency_store.recover_expired_operations()
+    # Simulate the lease expiring and run recovery.
+    assert isolated_idempotency_store.expire_lease(
+        idempotency_key
     )
 
-    assert recovered_count == 1
+    isolated_idempotency_store.recover_expired_operations()
 
-    # Step 5: Verify the recovery state.
     operation = isolated_idempotency_store.lookup(
         idempotency_key
     )
 
     assert operation["status"] == "recovery_required"
 
-    # Step 6: Repeat the same request.
+    # A repeated request must not execute the tool again.
     retry_result = registry.execute_tool(
         "calculator",
         '{"expression":"5 + 5"}',
-        idempotency_key=idempotency_key
+        idempotency_key=idempotency_key,
     )
 
-    # The calculator must not execute a second time.
     assert execution_count == 1
     assert "recovery" in retry_result.lower()
+
+
+# ---------------------------------------------------------
+# Reconciliation helpers and tests
+# ---------------------------------------------------------
 
 def create_recovery_required_operation(
     store,
     idempotency_key,
     tool_name="calculator",
-    arguments=None
+    arguments=None,
 ):
     if arguments is None:
         arguments = {"expression": "10 + 5"}
@@ -895,28 +1064,14 @@ def create_recovery_required_operation(
     claim = store.claim(
         idempotency_key,
         tool_name,
-        arguments
+        arguments,
     )
 
     assert claim["status"] == "new"
 
-    # Simulate an operation whose worker lease has expired.
-    with store._connect() as connection:
-        connection.execute(
-            """
-            UPDATE operations
-            SET lease_expires_at = ?
-            WHERE idempotency_key = ?
-            """,
-            (
-                "2000-01-01T00:00:00+00:00",
-                idempotency_key
-            )
-        )
+    assert store.expire_lease(idempotency_key)
 
-    recovered_count = store.recover_expired_operations()
-
-    assert recovered_count == 1
+    store.recover_expired_operations()
 
     operation = store.lookup(idempotency_key)
 
@@ -924,11 +1079,11 @@ def create_recovery_required_operation(
 
     return operation
 
+
 def test_reconciled_completed_operation_is_not_executed_again(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
 
     def fake_calculator(expression):
@@ -937,51 +1092,45 @@ def test_reconciled_completed_operation_is_not_executed_again(
         return f"result:{expression}"
 
     monkeypatch.setattr(
-        tool,
+        registry.TOOL_REGISTRY["calculator"],
         "function",
-        fake_calculator
+        fake_calculator,
     )
 
     idempotency_key = "reconciled_completed_001"
 
-    # Step 1: Create an operation requiring recovery.
     create_recovery_required_operation(
         isolated_idempotency_store,
-        idempotency_key
+        idempotency_key,
     )
 
-    # Step 2: An operator confirms that the operation completed.
     isolated_idempotency_store.reconcile_operation(
         idempotency_key=idempotency_key,
         decision="completed",
         evidence="External evidence confirms successful execution.",
         reconciled_by="test_operator",
-        reconciled_result="Verified result from external evidence."
+        reconciled_result="Verified result from external evidence.",
     )
 
-    # Step 3: Submit the same request through the actual registry.
     result = registry.execute_tool(
         tool_name="calculator",
         arguments='{"expression": "10 + 5"}',
-        idempotency_key=idempotency_key
+        idempotency_key=idempotency_key,
     )
 
     operation = isolated_idempotency_store.lookup(
         idempotency_key
     )
 
-    # The tool must not execute again.
     assert execution_count == 0
-
-    # The registry must return the stored reconciled outcome.
     assert result == operation["result"]
     assert operation["status"] == "completed"
 
+
 def test_reconciled_failed_operation_is_not_executed_again(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
 
     def fake_calculator(expression):
@@ -990,29 +1139,29 @@ def test_reconciled_failed_operation_is_not_executed_again(
         return f"result:{expression}"
 
     monkeypatch.setattr(
-        tool,
+        registry.TOOL_REGISTRY["calculator"],
         "function",
-        fake_calculator
+        fake_calculator,
     )
 
     idempotency_key = "reconciled_failed_001"
 
     create_recovery_required_operation(
         isolated_idempotency_store,
-        idempotency_key
+        idempotency_key,
     )
 
     isolated_idempotency_store.reconcile_operation(
         idempotency_key=idempotency_key,
         decision="failed",
         evidence="External evidence confirms that execution failed.",
-        reconciled_by="test_operator"
+        reconciled_by="test_operator",
     )
 
     result = registry.execute_tool(
         tool_name="calculator",
         arguments='{"expression": "10 + 5"}',
-        idempotency_key=idempotency_key
+        idempotency_key=idempotency_key,
     )
 
     operation = isolated_idempotency_store.lookup(
@@ -1023,11 +1172,11 @@ def test_reconciled_failed_operation_is_not_executed_again(
     assert "Automatic re-execution is blocked" in result
     assert execution_count == 0
 
+
 def test_reconciled_operation_rejects_different_arguments(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
 
     def fake_calculator(expression):
@@ -1036,9 +1185,9 @@ def test_reconciled_operation_rejects_different_arguments(
         return f"result:{expression}"
 
     monkeypatch.setattr(
-        tool,
+        registry.TOOL_REGISTRY["calculator"],
         "function",
-        fake_calculator
+        fake_calculator,
     )
 
     idempotency_key = "reconciled_arguments_001"
@@ -1046,7 +1195,7 @@ def test_reconciled_operation_rejects_different_arguments(
     create_recovery_required_operation(
         isolated_idempotency_store,
         idempotency_key,
-        arguments={"expression": "10 + 5"}
+        arguments={"expression": "10 + 5"},
     )
 
     isolated_idempotency_store.reconcile_operation(
@@ -1054,24 +1203,23 @@ def test_reconciled_operation_rejects_different_arguments(
         decision="completed",
         evidence="External evidence confirms successful execution.",
         reconciled_by="test_operator",
-        reconciled_result="Verified result from external evidence."
+        reconciled_result="Verified result from external evidence.",
     )
 
-    # Same key, but different arguments.
     result = registry.execute_tool(
         tool_name="calculator",
         arguments='{"expression": "20 + 5"}',
-        idempotency_key=idempotency_key
+        idempotency_key=idempotency_key,
     )
 
     assert "Idempotency conflict" in result
     assert execution_count == 0
 
+
 def test_reconciliation_does_not_bypass_authorization(
     isolated_idempotency_store,
-    monkeypatch
+    monkeypatch,
 ):
-    tool = registry.TOOL_REGISTRY["calculator"]
     execution_count = 0
 
     def fake_calculator(expression):
@@ -1080,16 +1228,16 @@ def test_reconciliation_does_not_bypass_authorization(
         return f"result:{expression}"
 
     monkeypatch.setattr(
-        tool,
+        registry.TOOL_REGISTRY["calculator"],
         "function",
-        fake_calculator
+        fake_calculator,
     )
 
     idempotency_key = "reconciled_authorization_001"
 
     create_recovery_required_operation(
         isolated_idempotency_store,
-        idempotency_key
+        idempotency_key,
     )
 
     isolated_idempotency_store.reconcile_operation(
@@ -1097,10 +1245,9 @@ def test_reconciliation_does_not_bypass_authorization(
         decision="completed",
         evidence="External evidence confirms successful execution.",
         reconciled_by="test_operator",
-        reconciled_result="Verified result from external evidence."
+        reconciled_result="Verified result from external evidence.",
     )
 
-    # This caller has no calculator permission.
     unauthorized_policy = ToolPolicy(
         allowed_permissions=frozenset()
     )
@@ -1109,7 +1256,7 @@ def test_reconciliation_does_not_bypass_authorization(
         tool_name="calculator",
         arguments='{"expression": "10 + 5"}',
         policy=unauthorized_policy,
-        idempotency_key=idempotency_key
+        idempotency_key=idempotency_key,
     )
 
     assert "Tool authorization error" in result
