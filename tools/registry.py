@@ -257,6 +257,10 @@ def execute_tool(
                 arguments
             )
 
+            idempotency_arguments = tool.serialize_arguments(
+                validated_arguments
+            )
+
             # -------------------------------------------------
             # 4. Look up an existing operation.
             # -------------------------------------------------
@@ -264,7 +268,7 @@ def execute_tool(
             existing = idempotency_store.lookup(
                 idempotency_key,
                 tool_name,
-                validated_arguments,
+                idempotency_arguments,
             )
 
             if existing is not None:
@@ -294,7 +298,7 @@ def execute_tool(
                 claim = idempotency_store.claim(
                     idempotency_key,
                     tool_name,
-                    validated_arguments,
+                    idempotency_arguments,
                 )
 
                 if claim["status"] != "new":

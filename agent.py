@@ -1,10 +1,19 @@
 import json
+from uuid import UUID
 from typing import Any
 from llm_interface import LLMClient
 from tools.registry import (TOOL_DEFINITIONS, execute_tool)
 
 MAX_TOOL_ROUNDS = 5
 
+def _json_default(value: Any) -> str:
+    if isinstance(value, UUID):
+        return str(value)
+
+    raise TypeError(
+        f"Object of type {type(value).__name__} "
+        "is not JSON serializable"
+    )
 
 def request_tool_approval(
     tool_name: str,
@@ -25,7 +34,8 @@ def request_tool_approval(
         json.dumps(
             arguments,
             indent=4,
-            ensure_ascii=False
+            ensure_ascii=False,
+            default=_json_default,
         )
     )
 

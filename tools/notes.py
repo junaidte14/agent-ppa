@@ -163,7 +163,6 @@ NOTE_TOOLS = [
         name="delete_note",
         description=(
             "Permanently delete an existing note. "
-            "This action requires user approval."
         ),
         args_schema=DeleteNoteInput,
         function=delete_note,

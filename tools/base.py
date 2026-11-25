@@ -30,6 +30,13 @@ class Tool:
         )
         return validated.model_dump()
 
+    def serialize_arguments(
+        self,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        validated = self.args_schema.model_validate(arguments)
+        return validated.model_dump(mode="json")
+
     def request_approval(
         self,
         arguments: dict[str, Any],
