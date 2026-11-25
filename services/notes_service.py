@@ -52,6 +52,44 @@ class NotesService:
             "updated_at": note.updated_at.isoformat()
         }
 
+    @staticmethod
+    def _validate_pagination(
+        limit: int,
+        offset: int,
+    ) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer.")
+
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            raise ValueError("offset must be an integer.")
+
+        if not 1 <= limit <= 100:
+            raise ValueError(
+                "limit must be between 1 and 100."
+            )
+
+        if offset < 0:
+            raise ValueError(
+                "offset must be zero or greater."
+            )
+
+    @staticmethod
+    def _validate_search_query(query: str) -> str:
+        if not isinstance(query, str):
+            raise ValueError("query must be a string.")
+
+        query = query.strip()
+
+        if not query:
+            raise ValueError("query must not be empty.")
+
+        if len(query) > 200:
+            raise ValueError(
+                "query must not exceed 200 characters."
+            )
+
+        return query
+
     def create_note(
         self,
         title: str,
@@ -140,5 +178,57 @@ class NotesService:
                 )
 
             return True
+
+    def list_notes(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict:
+        self._validate_pagination(limit, offset)
+
+        with self.session_factory() as session:
+            notes, total = NotesRepository.list_notes(
+                session=session,
+                limit=limit,
+                offset=offset,
+            )
+
+            return {
+                "notes": [
+                    self._serialize(note)
+                    for note in notes
+                ],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+
+    def search_notes(
+        self,
+        query: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict:
+        query = self._validate_search_query(query)
+        self._validate_pagination(limit, offset)
+
+        with self.session_factory() as session:
+            notes, total = NotesRepository.search_notes(
+                session=session,
+                query=query,
+                limit=limit,
+                offset=offset,
+            )
+
+            return {
+                "query": query,
+                "notes": [
+                    self._serialize(note)
+                    for note in notes
+                ],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
 
 notes_service = NotesService()

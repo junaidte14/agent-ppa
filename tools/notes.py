@@ -9,6 +9,8 @@ from tools.schemas import (
     DeleteNoteInput,
     GetNoteInput,
     UpdateNoteInput,
+    ListNotesInput,
+    SearchNotesInput,
 )
 from services.notes_service import notes_service
 
@@ -95,6 +97,36 @@ def delete_note(
         "note_id": str(note_id),
     })
 
+def list_notes(
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    result = notes_service.list_notes(
+        limit=limit,
+        offset=offset,
+    )
+
+    return _json_result({
+        "status": "found",
+        **result,
+    })
+
+
+def search_notes(
+    query: str,
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    result = notes_service.search_notes(
+        query=query,
+        limit=limit,
+        offset=offset,
+    )
+
+    return _json_result({
+        "status": "found",
+        **result,
+    })
 
 NOTE_TOOLS = [
     Tool(
@@ -137,5 +169,26 @@ NOTE_TOOLS = [
         function=delete_note,
         required_permission="notes:delete",
         requires_approval=True,
+    ),
+    Tool(
+        name="list_notes",
+        description=(
+            "List saved notes, ordered by most recently updated. "
+            "Supports pagination using limit and offset."
+        ),
+        args_schema=ListNotesInput,
+        function=list_notes,
+        required_permission="notes:read",
+    ),
+    Tool(
+        name="search_notes",
+        description=(
+            "Search saved notes by matching text in their titles "
+            "or content. Search is case-insensitive and supports "
+            "pagination using limit and offset."
+        ),
+        args_schema=SearchNotesInput,
+        function=search_notes,
+        required_permission="notes:read",
     ),
 ]

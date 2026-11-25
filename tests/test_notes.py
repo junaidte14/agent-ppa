@@ -743,3 +743,620 @@ def test_delete_note_tool_returns_not_found():
     )
 
     assert result["status"] == "not_found"
+
+
+# ---------------------------------------------------------------------
+# 7. Notes listing and search: repository tests
+# ---------------------------------------------------------------------
+
+def test_repository_list_notes_returns_notes_and_total(
+    tracked_note_ids,
+):
+    with SessionLocal() as session:
+        with session.begin():
+            first = NotesRepository.create(
+                session=session,
+                title="List test one",
+                content="First note",
+            )
+            second = NotesRepository.create(
+                session=session,
+                title="List test two",
+                content="Second note",
+            )
+
+            tracked_note_ids.extend([first.id, second.id])
+
+        with session.begin():
+            notes, total = NotesRepository.list_notes(
+                session=session,
+                limit=10,
+                offset=0,
+            )
+
+            returned_ids = {note.id for note in notes}
+
+            assert first.id in returned_ids
+            assert second.id in returned_ids
+            assert total >= 2
+
+
+def test_repository_list_notes_supports_pagination(
+    tracked_note_ids,
+):
+    with SessionLocal() as session:
+        with session.begin():
+            for index in range(3):
+                note = NotesRepository.create(
+                    session=session,
+                    title=f"Pagination test {index}",
+                    content=f"Pagination content {index}",
+                )
+                tracked_note_ids.append(note.id)
+
+        with session.begin():
+            first_page, total = NotesRepository.list_notes(
+                session=session,
+                limit=2,
+                offset=0,
+            )
+
+            second_page, _ = NotesRepository.list_notes(
+                session=session,
+                limit=2,
+                offset=2,
+            )
+
+            assert len(first_page) == 2
+            assert total >= 3
+            assert len(second_page) >= 1
+
+            first_ids = {note.id for note in first_page}
+            second_ids = {note.id for note in second_page}
+
+            assert first_ids.isdisjoint(second_ids)
+
+
+def test_repository_search_matches_title(
+    tracked_note_ids,
+):
+    with SessionLocal() as session:
+        with session.begin():
+            note = NotesRepository.create(
+                session=session,
+                title="UniqueResearchKeyword",
+                content="Ordinary content",
+            )
+            tracked_note_ids.append(note.id)
+
+        with session.begin():
+            notes, total = NotesRepository.search_notes(
+                session=session,
+                query="UniqueResearchKeyword",
+            )
+
+            assert total >= 1
+            assert any(item.id == note.id for item in notes)
+
+
+def test_repository_search_matches_content(
+    tracked_note_ids,
+):
+    with SessionLocal() as session:
+        with session.begin():
+            note = NotesRepository.create(
+                session=session,
+                title="Ordinary title",
+                content="UniqueContentKeyword",
+            )
+            tracked_note_ids.append(note.id)
+
+        with session.begin():
+            notes, total = NotesRepository.search_notes(
+                session=session,
+                query="UniqueContentKeyword",
+            )
+
+            assert total >= 1
+            assert any(item.id == note.id for item in notes)
+
+
+def test_repository_search_is_case_insensitive(
+    tracked_note_ids,
+):
+    with SessionLocal() as session:
+        with session.begin():
+            note = NotesRepository.create(
+                session=session,
+                title="CaseSensitiveExample",
+                content="Some content",
+            )
+            tracked_note_ids.append(note.id)
+
+        with session.begin():
+            notes, total = NotesRepository.search_notes(
+                session=session,
+                query="casesensitiveexample",
+            )
+
+            assert total >= 1
+            assert any(item.id == note.id for item in notes)
+
+
+def test_repository_search_treats_percent_as_literal(
+    tracked_note_ids,
+):
+    with SessionLocal() as session:
+        with session.begin():
+            matching = NotesRepository.create(
+                session=session,
+                title="100% completed",
+                content="Literal percent example",
+            )
+            unrelated = NotesRepository.create(
+                session=session,
+                title="100 percent completed",
+                content="No percent sign",
+            )
+
+            tracked_note_ids.extend([
+                matching.id,
+                unrelated.id,
+            ])
+
+        with session.begin():
+            notes, total = NotesRepository.search_notes(
+                session=session,
+                query="100%",
+            )
+
+            returned_ids = {note.id for note in notes}
+
+            assert matching.id in returned_ids
+            assert unrelated.id not in returned_ids
+            assert total >= 1
+
+
+# ---------------------------------------------------------------------
+# 8. Notes listing and search: service tests
+# ---------------------------------------------------------------------
+
+def test_service_list_notes(
+    notes_service,
+    tracked_note_ids,
+):
+    created = notes_service.create_note(
+        title="Service list test",
+        content="List this note",
+    )
+    track_note(tracked_note_ids, created)
+
+    result = notes_service.list_notes()
+
+    assert "notes" in result
+    assert result["total"] >= 1
+    assert result["limit"] == 20
+    assert result["offset"] == 0
+
+    assert any(
+        note["id"] == created["id"]
+        for note in result["notes"]
+    )
+
+
+def test_service_list_notes_supports_pagination(
+    notes_service,
+    tracked_note_ids,
+):
+    for index in range(3):
+        created = notes_service.create_note(
+            title=f"Service page {index}",
+            content=f"Content {index}",
+        )
+        track_note(tracked_note_ids, created)
+
+    first_page = notes_service.list_notes(
+        limit=2,
+        offset=0,
+    )
+
+    second_page = notes_service.list_notes(
+        limit=2,
+        offset=2,
+    )
+
+    assert len(first_page["notes"]) == 2
+    assert first_page["total"] >= 3
+
+    first_ids = {
+        note["id"] for note in first_page["notes"]
+    }
+    second_ids = {
+        note["id"] for note in second_page["notes"]
+    }
+
+    assert first_ids.isdisjoint(second_ids)
+
+
+def test_service_list_notes_empty_database_page(
+    notes_service,
+):
+    result = notes_service.list_notes(
+        limit=20,
+        offset=100000,
+    )
+
+    assert result["notes"] == []
+    assert result["total"] >= 0
+
+
+@pytest.mark.parametrize(
+    ("limit", "offset"),
+    [
+        (0, 0),
+        (101, 0),
+        (20, -1),
+        (True, 0),
+        (20, True),
+    ],
+)
+def test_service_list_notes_rejects_invalid_pagination(
+    notes_service,
+    limit,
+    offset,
+):
+    with pytest.raises(ValueError):
+        notes_service.list_notes(
+            limit=limit,
+            offset=offset,
+        )
+
+
+def test_service_search_notes_matches_title(
+    notes_service,
+    tracked_note_ids,
+):
+    created = notes_service.create_note(
+        title="UniqueServiceSearchTitle",
+        content="Ordinary content",
+    )
+    track_note(tracked_note_ids, created)
+
+    result = notes_service.search_notes(
+        query="UniqueServiceSearchTitle",
+    )
+
+    assert result["total"] >= 1
+    assert result["query"] == "UniqueServiceSearchTitle"
+
+    assert any(
+        note["id"] == created["id"]
+        for note in result["notes"]
+    )
+
+
+def test_service_search_notes_matches_content(
+    notes_service,
+    tracked_note_ids,
+):
+    created = notes_service.create_note(
+        title="Ordinary title",
+        content="UniqueServiceSearchContent",
+    )
+    track_note(tracked_note_ids, created)
+
+    result = notes_service.search_notes(
+        query="UniqueServiceSearchContent",
+    )
+
+    assert result["total"] >= 1
+
+    assert any(
+        note["id"] == created["id"]
+        for note in result["notes"]
+    )
+
+
+def test_service_search_notes_is_case_insensitive(
+    notes_service,
+    tracked_note_ids,
+):
+    created = notes_service.create_note(
+        title="AgenticResearchNotes",
+        content="Research content",
+    )
+    track_note(tracked_note_ids, created)
+
+    result = notes_service.search_notes(
+        query="agenticresearchnotes",
+    )
+
+    assert any(
+        note["id"] == created["id"]
+        for note in result["notes"]
+    )
+
+
+def test_service_search_notes_returns_empty_for_no_match(
+    notes_service,
+):
+    result = notes_service.search_notes(
+        query="NoMatchingNoteShouldExist123456",
+    )
+
+    assert result["notes"] == []
+    assert result["total"] == 0
+
+
+def test_service_search_notes_supports_pagination(
+    notes_service,
+    tracked_note_ids,
+):
+    for index in range(3):
+        created = notes_service.create_note(
+            title=f"SearchPaginationUnique {index}",
+            content=f"Search pagination content {index}",
+        )
+        track_note(tracked_note_ids, created)
+
+    first_page = notes_service.search_notes(
+        query="SearchPaginationUnique",
+        limit=2,
+        offset=0,
+    )
+
+    second_page = notes_service.search_notes(
+        query="SearchPaginationUnique",
+        limit=2,
+        offset=2,
+    )
+
+    assert len(first_page["notes"]) == 2
+    assert first_page["total"] == 3
+    assert len(second_page["notes"]) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",
+        " ",
+    ],
+)
+def test_service_search_notes_rejects_empty_query(
+    notes_service,
+    query,
+):
+    with pytest.raises(ValueError):
+        notes_service.search_notes(query=query)
+
+
+def test_service_search_notes_rejects_long_query(
+    notes_service,
+):
+    with pytest.raises(ValueError):
+        notes_service.search_notes(
+            query="a" * 201,
+        )
+
+
+@pytest.mark.parametrize(
+    ("limit", "offset"),
+    [
+        (0, 0),
+        (101, 0),
+        (20, -1),
+        (True, 0),
+        (20, True),
+    ],
+)
+def test_service_search_notes_rejects_invalid_pagination(
+    notes_service,
+    limit,
+    offset,
+):
+    with pytest.raises(ValueError):
+        notes_service.search_notes(
+            query="valid",
+            limit=limit,
+            offset=offset,
+        )
+
+
+# ---------------------------------------------------------------------
+# 9. New Notes schema tests
+# ---------------------------------------------------------------------
+
+def test_list_notes_schema_defaults():
+    from tools.schemas import ListNotesInput
+
+    data = ListNotesInput.model_validate_json("{}")
+
+    assert data.limit == 20
+    assert data.offset == 0
+
+
+def test_list_notes_schema_accepts_pagination():
+    from tools.schemas import ListNotesInput
+
+    data = ListNotesInput.model_validate_json(
+        json.dumps({
+            "limit": 10,
+            "offset": 20,
+        })
+    )
+
+    assert data.limit == 10
+    assert data.offset == 20
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"limit": 0, "offset": 0},
+        {"limit": 101, "offset": 0},
+        {"limit": 20, "offset": -1},
+        {"unexpected": "value"},
+    ],
+)
+def test_list_notes_schema_rejects_invalid_input(payload):
+    from tools.schemas import ListNotesInput
+
+    with pytest.raises(ValueError):
+        ListNotesInput.model_validate_json(
+            json.dumps(payload)
+        )
+
+
+def test_search_notes_schema_accepts_valid_input():
+    from tools.schemas import SearchNotesInput
+
+    data = SearchNotesInput.model_validate_json(
+        json.dumps({
+            "query": "agentic AI",
+            "limit": 10,
+            "offset": 20,
+        })
+    )
+
+    assert data.query == "agentic AI"
+    assert data.limit == 10
+    assert data.offset == 20
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"query": ""},
+        {"query": "   "},
+        {"query": "a" * 201},
+        {"query": "valid", "limit": 0},
+        {"query": "valid", "limit": 101},
+        {"query": "valid", "offset": -1},
+    ],
+)
+def test_search_notes_schema_rejects_invalid_input(payload):
+    from tools.schemas import SearchNotesInput
+
+    with pytest.raises(ValueError):
+        SearchNotesInput.model_validate_json(
+            json.dumps(payload)
+        )
+
+
+# ---------------------------------------------------------------------
+# 10. New Notes tool registration and execution tests
+# ---------------------------------------------------------------------
+
+def test_list_and_search_tools_are_registered():
+    assert "list_notes" in TOOL_REGISTRY
+    assert "search_notes" in TOOL_REGISTRY
+
+
+def test_list_and_search_tools_are_in_llm_definitions():
+    from tools.registry import TOOL_DEFINITIONS
+
+    tool_names = {
+        definition["function"]["name"]
+        for definition in TOOL_DEFINITIONS
+    }
+
+    assert "list_notes" in tool_names
+    assert "search_notes" in tool_names
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "list_notes",
+        "search_notes",
+    ],
+)
+def test_list_and_search_tools_use_read_permission(
+    tool_name,
+):
+    tool = TOOL_REGISTRY[tool_name]
+
+    assert tool.required_permission == "notes:read"
+    assert DEFAULT_TOOL_POLICY.is_allowed("notes:read")
+    assert tool.requires_approval is False
+
+
+def test_list_notes_tool_returns_json(
+    tracked_note_ids,
+):
+    tools = get_note_tools()
+
+    created = json.loads(
+        tools["create_note"].function(
+            title="List tool test",
+            content="Created for list tool",
+        )
+    )
+
+    track_note(tracked_note_ids, created["note"])
+
+    result = json.loads(
+        tools["list_notes"].function(
+            limit=20,
+            offset=0,
+        )
+    )
+
+    assert result["status"] == "found"
+    assert result["total"] >= 1
+    assert result["limit"] == 20
+    assert result["offset"] == 0
+
+    assert any(
+        note["id"] == created["note"]["id"]
+        for note in result["notes"]
+    )
+
+
+def test_search_notes_tool_returns_json(
+    tracked_note_ids,
+):
+    tools = get_note_tools()
+
+    created = json.loads(
+        tools["create_note"].function(
+            title="UniqueToolSearchTerm",
+            content="Tool search test content",
+        )
+    )
+
+    track_note(tracked_note_ids, created["note"])
+
+    result = json.loads(
+        tools["search_notes"].function(
+            query="UniqueToolSearchTerm",
+            limit=20,
+            offset=0,
+        )
+    )
+
+    assert result["status"] == "found"
+    assert result["query"] == "UniqueToolSearchTerm"
+    assert result["total"] >= 1
+
+    assert any(
+        note["id"] == created["note"]["id"]
+        for note in result["notes"]
+    )
+
+
+def test_search_notes_tool_returns_empty_results():
+    tools = get_note_tools()
+
+    result = json.loads(
+        tools["search_notes"].function(
+            query="NoSuchNoteTerm123456",
+            limit=20,
+            offset=0,
+        )
+    )
+
+    assert result["status"] == "found"
+    assert result["total"] == 0
+    assert result["notes"] == []
