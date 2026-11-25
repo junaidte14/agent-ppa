@@ -15,6 +15,7 @@ from tools.calculator import calculator
 from tools.date_time import get_current_datetime
 from tools.text_analyzer import analyze_text
 from tools.messaging import send_message
+from tools.notes import NOTE_TOOLS
 
 from tools.schemas import (
     CalculatorInput,
@@ -72,6 +73,8 @@ TOOLS = [
         requires_approval=True,
     ),
 ]
+
+TOOLS.extend(NOTE_TOOLS)
 
 TOOL_REGISTRY = {
     tool.name: tool for tool in TOOLS

@@ -15,6 +15,10 @@ DEFAULT_TOOL_POLICY = ToolPolicy(
         "math:calculate",
         "system:read_time",
         "text:analyze",
-        "message:send"
+        "message:send",
+        "notes:create",
+        "notes:read",
+        "notes:update",
+        "notes:delete",
     })
 )
