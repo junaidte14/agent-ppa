@@ -24,6 +24,9 @@ import {
   X,
 } from "lucide-react";
 
+import ChatPage from "./features/chat/ChatPage";
+import "./styles/chat.css";
+
 type Page =
   | "Dashboard"
   | "Chat"
@@ -358,6 +361,8 @@ function App() {
               backendStatus={backendStatus}
               navigate={navigate}
             />
+          ) : activePage === "Chat" ? (
+            <ChatPage />
           ) : (
             <WorkspacePlaceholder
               page={activePage}
