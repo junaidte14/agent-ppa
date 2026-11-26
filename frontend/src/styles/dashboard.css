@@ -1,0 +1,415 @@
+
+/* DASHBOARD */
+
+.dashboard {
+  max-width: 1150px;
+  margin: 0 auto;
+}
+
+.welcome-section {
+  position: relative;
+  min-height: 155px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+
+.welcome-section h2 {
+  margin: 15px 0 8px;
+  color: #192f50;
+  font-size: clamp(25px, 3vw, 33px);
+  letter-spacing: -1.2px;
+  font-weight: 700;
+}
+
+.welcome-section p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.welcome-decoration {
+  width: 160px;
+  height: 140px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  color: #5085e4;
+  margin-right: 60px;
+}
+
+.welcome-decoration > svg {
+  position: relative;
+  z-index: 2;
+}
+
+.decoration-circle {
+  position: absolute;
+  border-radius: 50%;
+  background: #e5edff;
+}
+
+.circle-one {
+  width: 130px;
+  height: 130px;
+}
+
+.circle-two {
+  width: 92px;
+  height: 92px;
+  background: #d5e4ff;
+}
+
+/* ASSISTANT CARD */
+
+.assistant-card {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 25px 27px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: linear-gradient(110deg, #e9f1ff 0%, #f4f7ff 100%);
+  border: 1px solid #dce8ff;
+  margin-bottom: 38px;
+}
+
+.assistant-icon {
+  width: 49px;
+  height: 49px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: #fff;
+  background: linear-gradient(140deg, #4d8bf8, #2d68dc);
+  box-shadow: 0 6px 16px rgba(51, 110, 218, 0.23);
+  flex-shrink: 0;
+}
+
+.assistant-content {
+  flex: 1;
+  position: relative;
+  z-index: 2;
+}
+
+.assistant-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 13px;
+}
+
+.assistant-title-row h3 {
+  margin: 2px 0;
+  font-size: 15px;
+  color: #1e3557;
+}
+
+.agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 20px;
+  padding: 5px 9px;
+  background: #ddf6e9;
+  color: #138453;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.agent-badge span {
+  width: 6px;
+  height: 6px;
+  background: #16a36a;
+  border-radius: 50%;
+}
+
+.assistant-content p {
+  max-width: 610px;
+  margin: 9px 0 17px;
+  color: #60748f;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.assistant-decoration {
+  position: absolute;
+  right: 38px;
+  top: 22px;
+  color: #b4cbf5;
+}
+
+/* SECTIONS */
+
+.section-block {
+  margin-bottom: 35px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 17px;
+}
+
+.section-heading h3 {
+  margin: 0 0 5px;
+  color: #213754;
+  font-size: 15px;
+}
+
+.section-heading p {
+  margin: 0;
+  color: #8995a9;
+  font-size: 10px;
+}
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.capability-card {
+  min-height: 128px;
+  padding: 17px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  transition: 160ms ease;
+}
+
+.capability-card:hover {
+  border-color: #bdd2fb;
+  transform: translateY(-2px);
+  box-shadow: 0 7px 18px rgba(44, 79, 132, 0.06);
+}
+
+.capability-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: #edf3ff;
+  color: #3977e5;
+  margin-bottom: 10px;
+}
+
+.capability-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.capability-card-content h4 {
+  margin: 0 0 5px;
+  font-size: 12px;
+  color: #243b5c;
+}
+
+.capability-card-content p {
+  margin: 0 0 9px;
+  color: #7b8ba4;
+  font-size: 10px;
+}
+
+.capability-status {
+  color: #4b7bc3;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+/* SYSTEM STATUS */
+
+.system-card {
+  padding: 4px 19px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: #fff;
+}
+
+.system-item {
+  min-height: 67px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.system-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 10px;
+  color: #3978df;
+  background: #edf3ff;
+}
+
+.database-icon {
+  color: #26956c;
+  background: #e8f8ef;
+}
+
+.agent-icon {
+  color: #8763cb;
+  background: #f1ebff;
+}
+
+.system-item > div:nth-child(2) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.system-item strong {
+  color: #2d405d;
+  font-size: 11px;
+}
+
+.system-item span {
+  color: #8996a9;
+  font-size: 9px;
+}
+
+.system-state {
+  padding: 5px 9px;
+  border-radius: 15px;
+  font-weight: 600;
+}
+
+.system-state.online {
+  color: #158454;
+  background: #e6f8ee;
+}
+
+.system-state.offline {
+  color: #bd4444;
+  background: #fff0f0;
+}
+
+.system-state.checking,
+.system-state.planned {
+  color: #667a9a;
+  background: #eff3f8;
+}
+
+.system-divider {
+  height: 1px;
+  background: #edf0f5;
+}
+
+/* FUTURE BANNER */
+
+.future-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 17px 20px;
+  border: 1px solid #e1e8f8;
+  border-radius: 13px;
+  background: #fff;
+}
+
+.future-icon {
+  width: 39px;
+  height: 39px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background: #f0edff;
+  color: #8061c5;
+}
+
+.future-banner > div:nth-child(2) {
+  flex: 1;
+}
+
+.future-banner strong {
+  font-size: 11px;
+  color: #31486a;
+}
+
+.future-banner p {
+  margin: 5px 0 0;
+  color: #8190a7;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.future-banner > svg {
+  color: #8496b1;
+}
+
+/* RESPONSIVE DASHBOARD */
+
+@media (max-width: 900px) {
+  .welcome-decoration {
+    margin-right: 10px;
+  }
+}
+
+@media (max-width: 680px) {
+  .welcome-section {
+    min-height: 130px;
+  }
+
+  .welcome-section h2 {
+    font-size: 25px;
+  }
+
+  .welcome-section p {
+    max-width: 270px;
+    font-size: 11px;
+    line-height: 1.7;
+  }
+
+  .welcome-decoration {
+    position: absolute;
+    right: -36px;
+    opacity: 0.45;
+  }
+
+  .assistant-card {
+    padding: 19px;
+    gap: 13px;
+  }
+
+  .assistant-decoration {
+    display: none;
+  }
+
+  .assistant-content p {
+    font-size: 11px;
+  }
+
+  .capability-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .system-item {
+    gap: 9px;
+  }
+
+  .system-item strong {
+    font-size: 10px;
+  }
+
+  .system-item span {
+    font-size: 8px;
+  }
+
+  .system-state {
+    padding: 5px 7px;
+  }
+}

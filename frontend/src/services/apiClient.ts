@@ -1,4 +1,6 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 async function request<T>(
   path: string,
@@ -25,6 +27,7 @@ async function request<T>(
 
     try {
       const body = await response.json();
+
       if (typeof body.detail === "string") {
         detail = body.detail;
       }
@@ -33,6 +36,11 @@ async function request<T>(
     }
 
     throw new Error(detail);
+  }
+
+  // DELETE endpoints may return 204 without a response body.
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return response.json() as Promise<T>;
@@ -48,5 +56,16 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(body),
     });
+  },
+
+  patch<T>(path: string, body: unknown): Promise<T> {
+    return request<T>(path, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  delete<T>(path: string): Promise<T> {
+    return request<T>(path, { method: "DELETE" });
   },
 };

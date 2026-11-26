@@ -17,6 +17,8 @@ from prompts import SYSTEM_PROMPT
 from tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 from tools.registry import TOOL_REGISTRY
 
+from api.routes.notes import router as notes_router
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
@@ -40,6 +42,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+app.include_router(notes_router)
 
 # ---------------------------------------------------------
 # Web-specific tool policy

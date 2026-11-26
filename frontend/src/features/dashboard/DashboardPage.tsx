@@ -1,4 +1,4 @@
-
+import "../../styles/dashboard.css";
 import {
   Activity,
   ArrowRight,

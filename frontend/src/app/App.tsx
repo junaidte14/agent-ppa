@@ -14,6 +14,7 @@ import type { Page } from "../types/navigation";
 
 import "../styles/layout.css";
 import "../styles/chat.css";
+import NotesPage from "../features/notes/NotesPage";
 
 export default function App() {
   const [activePage, setActivePage] =
@@ -41,6 +42,9 @@ export default function App() {
 
       case "Chat":
         return <ChatPage />;
+
+      case "Notes":
+        return <NotesPage />;
 
       default:
         return (
