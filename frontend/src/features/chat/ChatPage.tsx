@@ -5,6 +5,8 @@ import { MessageSquare, Plus } from "lucide-react";
 import {
   getConversation,
   getConversations,
+  renameConversation,
+  deleteConversation,
   type ConversationMessage,
   type ConversationSummary,
 } from "../../services/conversationService";
@@ -74,13 +76,18 @@ export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
+  const [totalConversations, setTotalConversations] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+
   // Prevent an older conversation request from replacing a newer selection.
   const conversationRequestId = useRef(0);
 
   async function refreshConversations() {
     try {
       const result = await getConversations(20, 0);
+
       setConversations(result.items);
+      setTotalConversations(result.total);
       setHistoryError(null);
     } catch (err) {
       setHistoryError(
@@ -98,18 +105,20 @@ export default function ChatPage() {
     async function loadConversations() {
       try {
         const result = await getConversations(20, 0);
-        if (active) {
-          setConversations(result.items);
-          setHistoryError(null);
-        }
+
+        if (!active) return;
+
+        setConversations(result.items);
+        setTotalConversations(result.total);
+        setHistoryError(null);
       } catch (err) {
-        if (active) {
-          setHistoryError(
-            err instanceof Error
-              ? err.message
-              : "Could not load conversation history.",
-          );
-        }
+        if (!active) return;
+
+        setHistoryError(
+          err instanceof Error
+            ? err.message
+            : "Could not load conversation history.",
+        );
       } finally {
         if (active) {
           setIsLoadingConversations(false);
@@ -123,6 +132,45 @@ export default function ChatPage() {
       active = false;
     };
   }, []);
+
+  async function handleLoadMoreConversations() {
+    if (
+      isLoadingMore ||
+      conversations.length >= totalConversations
+    ) {
+      return;
+    }
+
+    setIsLoadingMore(true);
+    setHistoryError(null);
+
+    try {
+      const result = await getConversations(20, conversations.length);
+
+      // Append results while avoiding duplicate conversation IDs.
+      setConversations((current) => {
+        const existingIds = new Set(
+          current.map((conversation) => conversation.id),
+        );
+
+        const newItems = result.items.filter(
+          (conversation) => !existingIds.has(conversation.id),
+        );
+
+        return [...current, ...newItems];
+      });
+
+      setTotalConversations(result.total);
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error
+          ? err.message
+          : "Could not load more conversations.",
+      );
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }
 
   async function handleSelectConversation(
     selectedConversationId: string,
@@ -203,6 +251,83 @@ export default function ChatPage() {
     }
   }
 
+  async function handleDeleteConversation(
+    deletedId: string,
+  ): Promise<boolean> {
+    if (isSending || isLoadingConversation) {
+      return false;
+    }
+
+    setHistoryError(null);
+
+    try {
+      await deleteConversation(deletedId);
+
+      setConversations((current) =>
+        current.filter(
+          (conversation) => conversation.id !== deletedId,
+        ),
+      );
+
+      if (deletedId === conversationId) {
+        conversationRequestId.current += 1;
+        setConversationId(undefined);
+        setMessages([]);
+        setError(null);
+        setTotalConversations((current) => Math.max(0, current - 1));
+        setIsLoadingConversation(false);
+      }
+
+      return true;
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error
+          ? err.message
+          : "Could not delete the conversation.",
+      );
+
+      return false;
+    }
+  }
+
+  async function handleRenameConversation(
+    conversationId: string,
+    title: string,
+  ): Promise<boolean> {
+    setHistoryError(null);
+
+    try {
+      const updatedConversation = await renameConversation(
+        conversationId,
+        title,
+      );
+
+      setConversations((current) =>
+        current
+          .map((conversation) =>
+            conversation.id === conversationId
+              ? updatedConversation
+              : conversation,
+          )
+          .sort(
+            (a, b) =>
+              new Date(b.updated_at).getTime() -
+              new Date(a.updated_at).getTime(),
+          ),
+      );
+
+      return true;
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error
+          ? err.message
+          : "Could not rename the conversation.",
+      );
+
+      return false;
+    }
+  }
+
   function startNewConversation() {
     if (isSending || isLoadingConversation) return;
 
@@ -240,6 +365,11 @@ export default function ChatPage() {
           isLoading={isLoadingConversations}
           error={historyError}
           onSelect={handleSelectConversation}
+          onRename={handleRenameConversation}
+          onDelete={handleDeleteConversation}
+          totalConversations={totalConversations}
+          isLoadingMore={isLoadingMore}
+          onLoadMore={handleLoadMoreConversations}
         />
 
         <div className="chat-panel">

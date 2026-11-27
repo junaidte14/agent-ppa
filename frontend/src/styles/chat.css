@@ -357,3 +357,113 @@
     max-height: 180px;
   }
 }
+
+.conversation-history-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.conversation-history-row .conversation-history-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.conversation-history-row .conversation-history-item.active {
+  /* Keep the existing active-item appearance if you already have one. */
+  background: var(--surface-secondary, #f0f0f0);
+}
+
+.conversation-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.conversation-action-button:hover:not(:disabled) {
+  background: var(--surface-secondary, #f0f0f0);
+}
+
+.conversation-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.conversation-rename-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.conversation-rename-form input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border-color, #ccc);
+  border-radius: 6px;
+  font: inherit;
+  color: inherit;
+  background: var(--surface, #fff);
+}
+
+.conversation-rename-form input:focus {
+  outline: 2px solid var(--accent-color, #777);
+  outline-offset: 1px;
+}
+
+.conversation-delete-button:hover:not(:disabled) {
+  color: #dc2626;
+}
+
+.conversation-delete-confirm {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.conversation-delete-confirm span {
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-secondary, #666);
+}
+
+.conversation-delete-confirm-button:hover:not(:disabled) {
+  color: #dc2626;
+}
+
+.conversation-load-more {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.conversation-load-more:hover:not(:disabled) {
+  background: var(--surface-secondary, #f0f0f0);
+}
+
+.conversation-load-more:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
