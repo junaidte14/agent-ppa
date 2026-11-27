@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.chat import router as chat_router
 from api.routes.notes import router as notes_router
+from api.routes.conversations import router as conversations_router
 
 
 app = FastAPI(
@@ -26,6 +27,7 @@ app.add_middleware(
 # Register feature routers.
 app.include_router(notes_router)
 app.include_router(chat_router)
+app.include_router(conversations_router)
 
 
 @app.get("/api/health")
