@@ -39,3 +39,9 @@ class ConversationRenameRequest(BaseModel):
             raise ValueError("Conversation title cannot be empty.")
 
         return value
+
+class ConversationListResponse(BaseModel):
+    items: list[ConversationSummary]
+    total: int
+    limit: int
+    offset: int

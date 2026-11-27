@@ -56,13 +56,12 @@ class FakeConversationService:
         self.last_list_arguments = None
         self.last_rename_arguments = None
 
-    def list_conversations(self, limit=50, offset=0):
-        self.last_list_arguments = {
-            "limit": limit,
-            "offset": offset,
-        }
-
-        return [
+    def list_conversations(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+    ):
+        all_conversations = [
             {
                 key: value
                 for key, value in conversation.items()
@@ -70,6 +69,18 @@ class FakeConversationService:
             }
             for conversation in self.conversations.values()
         ]
+
+        items = all_conversations[offset:offset + limit]
+        self.last_list_arguments = {
+            "limit": limit,
+            "offset": offset,
+        }
+        return {
+            "items": items,
+            "total": len(all_conversations),
+            "limit": limit,
+            "offset": offset,
+        }
 
     def get_conversation(self, conversation_id):
         return self.conversations.get(str(conversation_id))
@@ -123,10 +134,13 @@ def test_list_conversations(client):
 
     data = response.json()
 
-    assert len(data) == 1
-    assert data[0]["id"] == str(CONVERSATION_ID)
-    assert data[0]["title"] == "Test conversation"
+    assert len(data["items"]) == 1
+    assert data["items"][0]["id"] == str(CONVERSATION_ID)
+    assert data["items"][0]["title"] == "Test conversation"
 
+    assert data["total"] == 1
+    assert data["limit"] == 20
+    assert data["offset"] == 0
 
 def test_list_conversations_supports_pagination(client):
     test_client, fake_service = client
@@ -137,11 +151,18 @@ def test_list_conversations_supports_pagination(client):
 
     assert response.status_code == 200
 
+    data = response.json()
+
+    assert data["limit"] == 10
+    assert data["offset"] == 20
+    assert data["total"] == 1
+    assert isinstance(data["items"], list)
+    assert len(data["items"]) == 0
+
     assert fake_service.last_list_arguments == {
         "limit": 10,
         "offset": 20,
     }
-
 
 @pytest.mark.parametrize(
     "query",

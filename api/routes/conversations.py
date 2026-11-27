@@ -1,10 +1,9 @@
-
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
-
 from api.schemas.conversations import (
     ConversationDetail,
+    ConversationListResponse,
     ConversationRenameRequest,
     ConversationSummary,
 )
@@ -19,10 +18,10 @@ router = APIRouter(
 
 @router.get(
     "",
-    response_model=list[ConversationSummary],
+    response_model=ConversationListResponse,
 )
 def list_conversations(
-    limit: int = Query(default=50, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
     try:
@@ -35,7 +34,6 @@ def list_conversations(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
-
 
 @router.get(
     "/{conversation_id}",

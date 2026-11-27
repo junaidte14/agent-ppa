@@ -238,3 +238,122 @@
     padding: 14px;
   }
 }
+
+
+.chat-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 16px;
+}
+
+.conversation-history {
+  display: flex;
+  width: 240px;
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.conversation-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.conversation-history-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.conversation-history-header span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.conversation-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+}
+
+.conversation-history-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.conversation-history-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-history-item:hover {
+  background: var(--background);
+}
+
+.conversation-history-item-active {
+  background: var(--blue-light);
+  color: var(--blue);
+  font-weight: 600;
+  cursor: default;
+}
+
+.conversation-history-message,
+.conversation-history-error {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.conversation-history-message {
+  color: var(--text-secondary);
+}
+
+.conversation-history-error {
+  color: #a52a2a;
+}
+
+.conversation-history-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 20px 5px;
+  color: var(--text-secondary);
+  text-align: center;
+  font-size: 12px;
+}
+
+.conversation-history-empty p {
+  margin: 0;
+}
+
+@media (max-width: 680px) {
+  .chat-workspace {
+    flex-direction: column;
+  }
+
+  .conversation-history {
+    width: auto;
+    max-height: 180px;
+  }
+}

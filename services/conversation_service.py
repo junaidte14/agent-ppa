@@ -97,6 +97,16 @@ class ConversationService:
 
         return normalized
 
+    @staticmethod
+    def _generate_title(message: str) -> str:
+        """Generate a concise conversation title from the first user message."""
+        title = " ".join(message.split())
+
+        if len(title) > 60:
+            title = title[:57].rstrip() + "..."
+
+        return title
+    
     def create_conversation(
         self,
         title: str = "New conversation",
@@ -142,9 +152,9 @@ class ConversationService:
 
     def list_conversations(
         self,
-        limit: int = 50,
+        limit: int = 20,
         offset: int = 0,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         if not 1 <= limit <= 100:
             raise ValueError("Limit must be between 1 and 100.")
 
@@ -152,16 +162,25 @@ class ConversationService:
             raise ValueError("Offset cannot be negative.")
 
         with self.session_factory() as session:
+            total = ConversationRepository.count_conversations(
+                session=session,
+            )
+
             conversations = ConversationRepository.list_conversations(
                 session=session,
                 limit=limit,
                 offset=offset,
             )
 
-            return [
-                self._serialize_conversation(conversation)
-                for conversation in conversations
-            ]
+            return {
+                "items": [
+                    self._serialize_conversation(conversation)
+                    for conversation in conversations
+                ],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
 
     def rename_conversation(
         self,
@@ -217,7 +236,7 @@ class ConversationService:
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         if not isinstance(messages, list) or not messages:
-            raise ValueError("At least one message is required.")
+            raise ValueError("Messages must be a non-empty list.")
 
         normalized_messages = [
             self._normalize_message(message)
@@ -234,20 +253,53 @@ class ConversationService:
                 if conversation is None:
                     raise LookupError("Conversation not found.")
 
+                existing_messages = ConversationRepository.list_messages(
+                    session=session,
+                    conversation_id=conversation_id,
+                )
+
+                # Generate a title only for a new, untouched conversation.
+                if (
+                    conversation.title == "New conversation"
+                    and not existing_messages
+                ):
+                    first_user_message = next(
+                        (
+                            message
+                            for message in normalized_messages
+                            if (
+                                message.get("role") == "user"
+                                and isinstance(message.get("content"), str)
+                                and message["content"].strip()
+                            )
+                        ),
+                        None,
+                    )
+
+                    if first_user_message is not None:
+                        title = self._generate_title(
+                            first_user_message["content"]
+                        )
+
+                        ConversationRepository.update_title(
+                            session=session,
+                            conversation=conversation,
+                            title=title,
+                        )
+
                 saved_messages = []
 
-                for message_data in normalized_messages:
-                    message = ConversationRepository.add_message(
-                        session=session,
-                        conversation_id=conversation_id,
-                        message_data=message_data,
+                for message in normalized_messages:
+                    saved_message = ConversationRepository.add_message(
+                        session,
+                        conversation_id,
+                        message,
                     )
 
                     saved_messages.append(
-                        self._serialize_message(message)
+                        self._serialize_message(saved_message)
                     )
 
             return saved_messages
-
 
 conversation_service = ConversationService()

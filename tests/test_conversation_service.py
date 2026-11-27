@@ -31,12 +31,13 @@ def create_tracked_conversation(
     tracked_conversation_ids,
     title="Test conversation",
 ):
-    conversation = conversation_service.create_conversation(title)
+    conversation = conversation_service.create_conversation(
+        title=title
+    )
 
     tracked_conversation_ids.append(conversation["id"])
 
     return conversation
-
 
 def test_create_and_get_conversation(
     conversation_service,
@@ -85,11 +86,14 @@ def test_list_conversations(
     )
 
     conversation_ids = {
-        conversation["id"] for conversation in conversations
+        conversation["id"] for conversation in conversations["items"]
     }
 
     assert first["id"] in conversation_ids
     assert second["id"] in conversation_ids
+    assert conversations["total"] >= 2
+    assert conversations["limit"] == 100
+    assert conversations["offset"] == 0
 
 
 def test_rename_conversation(
@@ -382,3 +386,128 @@ def test_list_conversations_validates_pagination(
 
     with pytest.raises(ValueError):
         conversation_service.list_conversations(offset=-1)
+
+def test_first_user_message_generates_conversation_title(
+    conversation_service,
+    tracked_conversation_ids,
+):
+    conversation = create_tracked_conversation(
+        conversation_service,
+        tracked_conversation_ids,
+        title="New conversation",
+    )
+
+    conversation_id = UUID(conversation["id"])
+
+    conversation_service.append_messages(
+        conversation_id,
+        [
+            {
+                "role": "user",
+                "content": "Help me plan my research project",
+            }
+        ],
+    )
+
+    result = conversation_service.get_conversation(conversation_id)
+
+    assert result["title"] == "Help me plan my research project"
+
+def test_subsequent_messages_do_not_overwrite_generated_title(
+    conversation_service,
+    tracked_conversation_ids,
+):
+    conversation = create_tracked_conversation(
+        conversation_service,
+        tracked_conversation_ids,
+        title="New conversation",
+    )
+
+    conversation_id = UUID(conversation["id"])
+
+    conversation_service.append_messages(
+        conversation_id,
+        [
+            {
+                "role": "user",
+                "content": "Help me plan my research project",
+            }
+        ],
+    )
+
+    conversation_service.append_messages(
+        conversation_id,
+        [
+            {
+                "role": "user",
+                "content": "Now focus on LLM reliability",
+            }
+        ],
+    )
+
+    result = conversation_service.get_conversation(conversation_id)
+
+    assert result["title"] == "Help me plan my research project"
+    assert len(result["messages"]) == 2
+
+def test_manual_conversation_title_is_preserved(
+    conversation_service,
+    tracked_conversation_ids,
+):
+    conversation = create_tracked_conversation(
+        conversation_service,
+        tracked_conversation_ids,
+        title="New conversation",
+    )
+
+    conversation_id = UUID(conversation["id"])
+
+    conversation_service.rename_conversation(
+        conversation_id,
+        "My Research Workspace",
+    )
+
+    conversation_service.append_messages(
+        conversation_id,
+        [
+            {
+                "role": "user",
+                "content": "Help me plan my research project",
+            }
+        ],
+    )
+
+    result = conversation_service.get_conversation(conversation_id)
+
+    assert result["title"] == "My Research Workspace"
+
+def test_generated_title_normalizes_whitespace_and_truncates(
+    conversation_service,
+    tracked_conversation_ids,
+):
+    conversation = create_tracked_conversation(
+        conversation_service,
+        tracked_conversation_ids,
+        title="New conversation",
+    )
+
+    conversation_id = UUID(conversation["id"])
+
+    message = "  ".join(["research"] * 12)
+
+    conversation_service.append_messages(
+        conversation_id,
+        [
+            {
+                "role": "user",
+                "content": message,
+            }
+        ],
+    )
+
+    result = conversation_service.get_conversation(conversation_id)
+
+    assert len(result["title"]) == 60
+    assert result["title"].endswith("...")
+    assert "\n" not in result["title"]
+    assert "  " not in result["title"]

@@ -131,3 +131,9 @@ class ConversationRepository:
         )
 
         return list(session.scalars(statement).all())
+
+    @staticmethod
+    def count_conversations(session: Session) -> int:
+        statement = select(func.count()).select_from(Conversation)
+
+        return session.scalar(statement) or 0
